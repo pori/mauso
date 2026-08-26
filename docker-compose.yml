@@ -1,0 +1,51 @@
+# mauso -- agentic AI chat PoC, deployed as its own independent Compose
+# project (name: mauso), joining an existing external Docker network that
+# also has your LLM endpoint and ComfyUI instance reachable on it -- same
+# pattern as any other stack sharing that network. No ports are published
+# to the host by default; put your own reverse proxy in front of it if you
+# want it reachable from outside the Docker network.
+#
+# The external network name defaults to `homellm_homellm` below (this
+# deployment's own network) -- override it by setting MAUSO_NETWORK in
+# .env, or just name your own external network `homellm_homellm` to skip
+# the override. Same story for COMFYUI_BASE_URL if your ComfyUI container
+# has a different name/host on that network.
+#
+# Privacy model, read before assuming more is encrypted than actually is:
+# conversation transcripts are end-to-end encrypted in the browser (Web
+# Crypto, AES-GCM, key derived from a passphrase that never leaves the
+# client) and live only in the browser's IndexedDB -- this backend never
+# stores them, not even transiently beyond a single in-flight request. It
+# DOES store, in plaintext on disk (mauso-data volume) like every other
+# stack here: the configured LLM endpoint's API key (encrypted at rest with
+# MAUSO_SECRET_KEY, see .env.example), any files uploaded for the RAG skill
+# (the backend has to read/chunk/embed/search them, so it can't be blind to
+# their content), and any images uploaded or generated/edited (ComfyUI has
+# to receive the actual bytes). See README.md for the full picture.
+name: mauso
+
+networks:
+  homellm:
+    external: true
+    name: ${MAUSO_NETWORK:-homellm_homellm}
+
+volumes:
+  mauso-data: # SQLite DB: provider settings, uploaded RAG docs/chunks/embeddings, chat images
+
+services:
+  mauso:
+    build:
+      context: .
+    container_name: mauso
+    restart: unless-stopped
+    environment:
+      - MAUSO_SECRET_KEY=${MAUSO_SECRET_KEY}
+      - COMFYUI_BASE_URL=${COMFYUI_BASE_URL:-http://comfyui:8188}
+      - DB_PATH=/data/mauso.db
+      - DEFAULT_CHAT_MODEL=${DEFAULT_CHAT_MODEL:-}
+    volumes:
+      - mauso-data:/data
+    networks:
+      - homellm
+    # No published ports on purpose -- put a reverse proxy in front of it
+    # (or add a `ports:` mapping here) if you need external access.

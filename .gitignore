@@ -1,0 +1,25 @@
+# secrets
+.env
+
+# local-only dev notes (see CLAUDE.md) -- not meant for the public repo
+PROJECT_NOTES.md
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# sqlite (mounted via the mauso-data volume in deployment; only matters if
+# something runs the app outside Docker with a local db file)
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# editor/OS cruft
+.DS_Store
+.idea/
+.vscode/

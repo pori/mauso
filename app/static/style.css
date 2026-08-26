@@ -1,0 +1,812 @@
+/* mauso -- warm, literary palette (think a small-press lit mag, not a SaaS
+   dashboard): paper/ink in light mode, espresso/parchment in dark, a rust
+   accent with a sage secondary, a serif masthead for the wordmark and page
+   titles. Personality comes from shape and type more than decoration --
+   asymmetric "speech bubble" tails on messages, a tactile hard-offset
+   shadow on real action buttons (not on quiet icon controls), an editorial
+   underline rule on headings -- kept restrained on purpose.
+
+   Shell: a persistent sidebar (nav + theme toggle, always; conversation
+   list/active documents/lock on the Chat page specifically via
+   sidebar_extra/sidebar_footer_extra in base.html) instead of a top bar --
+   there's no separate "Chat" nav link since opening the sidebar/brand link
+   *is* how you get to chat. */
+
+:root {
+  --bg: #f6f0e1;
+  --bg-panel: #efe4cc;
+  --bg-elevated: #e7d8b4;
+  --border: #cab88d;
+  --text: #241c12;
+  --text-dim: #7a6b4f;
+  --accent: #b8452f;
+  --accent-text: #fbf3e4;
+  --accent-2: #3c6b41;
+  --danger: #a3271b;
+  /* User chat bubbles get their own pair, independent of --accent, so they
+     don't just collide with whatever color buttons/links/underlines are
+     using -- see the dark theme override below where this actually matters. */
+  --user-bubble-bg: var(--accent);
+  --user-bubble-text: var(--accent-text);
+
+  --font-serif: Georgia, "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino, serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+/* Dark theme: deep forest/moss, not a straight brightness-inversion of the
+   light paper/rust palette -- cool green-black surfaces, moss as the primary
+   accent, a steel-teal secondary. The old brown "espresso" cast and orange
+   accent are gone entirely. User bubbles keep a warm terracotta/parchment
+   pair (--user-bubble-*) distinct from --accent so they don't blend into the
+   buttons/links/underlines that now all read moss green. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #10140f;
+    --bg-panel: #171d14;
+    --bg-elevated: #212a1c;
+    --border: #37452e;
+    --text: #e8ecdf;
+    --text-dim: #93a181;
+    --accent: #7fb56a;
+    --accent-text: #10140f;
+    --accent-2: #4a9dae;
+    --danger: #ff6b5b;
+    --user-bubble-bg: #46567a;
+    --user-bubble-text: #eef1f8;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #10140f;
+  --bg-panel: #171d14;
+  --bg-elevated: #212a1c;
+  --border: #37452e;
+  --text: #e8ecdf;
+  --text-dim: #93a181;
+  --accent: #7fb56a;
+  --accent-text: #10140f;
+  --accent-2: #4a9dae;
+  --danger: #ff6b5b;
+  --user-bubble-bg: #46567a;
+  --user-bubble-text: #eef1f8;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  height: 100vh;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+.page { padding: 1.5rem; max-width: 640px; margin: 0 auto; }
+.page h2 {
+  font-family: var(--font-serif);
+  font-weight: 700;
+  font-size: 1.6rem;
+  margin: 0 0 1.5rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 2px solid var(--accent);
+  display: inline-block;
+}
+
+.hint { color: var(--text-dim); font-size: 0.85rem; }
+.error { color: var(--danger); }
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background: var(--bg-elevated);
+  padding: 0.1em 0.4em;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+
+label { display: block; margin-bottom: 1rem; }
+input[type=text], input[type=password], textarea, .page select {
+  width: 100%;
+  margin-top: 0.25rem;
+  padding: 0.5rem;
+  background: var(--bg-elevated);
+  border: none;
+  border-radius: 6px;
+  color: var(--text);
+  font-family: inherit;
+  /* iOS Safari auto-zooms on focus for any text input under 16px --
+     explicit 16px (not a rem/em, the zoom threshold is the computed
+     pixel size) avoids that regardless of the browser's form-control
+     default font size. */
+  font-size: 16px;
+}
+
+.profile-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--bg-elevated);
+}
+.profile-row span { flex: 1; }
+.profile-row button { padding: 0.3rem 0.7rem; font-size: 0.85rem; }
+#profile-list { margin-bottom: 1.5rem; }
+#profile-cancel-btn { margin-left: 0.5rem; }
+input:focus, select:focus, button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+button {
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  border: none;
+  background: var(--bg-elevated);
+  color: var(--text);
+  cursor: pointer;
+  box-shadow: 2px 2px 0 var(--border);
+  transition: transform 0.08s ease, box-shadow 0.08s ease, filter 0.08s ease;
+}
+button:hover { filter: brightness(1.1); }
+button:active { transform: translate(2px, 2px); box-shadow: 0 0 0 var(--border); }
+.btn-primary {
+  background: var(--accent);
+  color: var(--accent-text);
+  box-shadow: 2px 2px 0 var(--text);
+  font-weight: 600;
+}
+.btn-primary:active { box-shadow: 0 0 0 var(--text); }
+.btn-danger { color: var(--danger); }
+
+/* Quiet icon-only chrome controls -- no tactile shadow, that treatment is
+   reserved for real actions (Send, Save, Unlock, +New conversation). */
+.sidebar-toggle, .btn-lock, .theme-toggle { box-shadow: none; }
+.sidebar-toggle:active, .btn-lock:active, .theme-toggle:active { transform: none; }
+
+/* Unlock overlay */
+.overlay {
+  position: fixed; inset: 0;
+  background: rgba(10, 8, 5, 0.82);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 100;
+}
+.unlock-box {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 2rem;
+  width: min(320px, 90vw);
+}
+.unlock-box h2 { font-size: 1.4rem; margin-bottom: 0.75rem; }
+.unlock-box input { margin-bottom: 0.75rem; }
+.unlock-box button { width: 100%; margin-top: 0.5rem; }
+
+/* ---------- App shell: persistent sidebar + main ---------- */
+.app-shell { display: flex; flex: 1; min-height: 0; width: 100%; position: relative; }
+
+.sidebar {
+  width: 260px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border);
+  background: var(--bg-panel);
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  overflow-y: auto;
+}
+.sidebar .brand {
+  font-family: var(--font-serif);
+  font-style: italic;
+  font-weight: 700;
+  font-size: 1.4rem;
+  letter-spacing: -0.01em;
+  color: var(--accent);
+  text-decoration: none;
+  display: inline-block;
+  transform: rotate(-1.5deg);
+}
+.sidebar-nav { display: flex; flex-direction: column; gap: 0.15rem; }
+.sidebar-nav a {
+  color: var(--text-dim);
+  text-decoration: none;
+  padding: 0.4rem 0.5rem;
+  border-radius: 6px;
+  font-size: 0.9rem;
+}
+.sidebar-nav a:hover { background: var(--bg-elevated); color: var(--text); }
+.sidebar-nav a.active { background: var(--bg-elevated); color: var(--text); font-weight: 600; }
+
+.sidebar-toggle { display: none; } /* shown only under the mobile media query below */
+.sidebar-backdrop { display: none; }
+
+.convo-list { display: flex; flex-direction: column; gap: 0.25rem; }
+.convo-item-row { display: flex; align-items: center; gap: 0.1rem; position: relative; }
+.convo-item {
+  display: block;
+  flex: 1;
+  min-width: 0; /* required for text-overflow: ellipsis to work inside a flex child */
+  padding: 0.5rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  color: var(--text-dim);
+  text-decoration: none; /* .convo-item is also used as a plain <a> on the Files/Settings pages */
+}
+@media (hover: hover) {
+  .convo-item:hover { background: var(--bg-elevated); }
+}
+.convo-item.active { background: var(--bg-elevated); color: var(--text); }
+
+/* Per-conversation "..." menu (download/rename/clone/delete), a la Open
+   WebUI. Always visible rather than hover-revealed -- this sidebar is used
+   heavily from mobile, where there's no hover to reveal it with. */
+.convo-menu-btn {
+  flex-shrink: 0;
+  width: 1.6rem; height: 1.6rem;
+  padding: 0;
+  line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+  background: none;
+  box-shadow: none;
+  border-radius: 4px;
+  color: var(--text-dim);
+}
+@media (hover: hover) {
+  .convo-menu-btn:hover { color: var(--text); background: var(--bg-elevated); filter: none; }
+}
+.convo-menu {
+  display: none;
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 50;
+  margin-top: 0.2rem;
+  min-width: 150px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.3rem;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+.convo-item-row.menu-open .convo-menu { display: flex; flex-direction: column; }
+.convo-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  width: 100%;
+  padding: 0.45rem 0.6rem;
+  border-radius: 6px;
+  background: none;
+  box-shadow: none;
+  color: var(--text);
+  font-size: 0.85rem;
+  text-align: left;
+}
+@media (hover: hover) {
+  .convo-menu-item:hover { background: var(--bg-panel); filter: none; }
+}
+.convo-menu-item.danger { color: var(--danger); }
+.convo-rename-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-panel);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 0.4rem 0.5rem;
+  color: var(--text);
+  font-size: 16px; /* avoid iOS zoom-on-focus */
+}
+
+.active-files-panel h4 {
+  margin: 0 0 0.5rem;
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+}
+.file-toggle { display: block; font-size: 0.85rem; margin-bottom: 0.35rem; }
+
+.sidebar-footer {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.btn-lock { display: flex; align-items: center; gap: 0.4rem; color: var(--text-dim); font-size: 0.85rem; }
+.btn-lock:hover { color: var(--danger); filter: brightness(1.1); }
+.theme-toggle {
+  width: 2rem; height: 2rem;
+  padding: 0; /* the global `button` rule's padding fights a fixed-size icon button --
+                 without this the glyph sits squeezed off-center instead of centered */
+  line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg-elevated);
+  border-radius: 6px;
+  font-size: 1rem;
+}
+.theme-toggle:hover { filter: brightness(1.15); }
+
+main { flex: 1; min-height: 0; display: flex; }
+
+.chat-panel { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+.chat-title-bar {
+  padding: 0.75rem 1.5rem;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  font-family: var(--font-serif);
+  font-style: italic;
+  color: var(--text-dim);
+}
+
+.messages-wrap { flex: 1; min-height: 0; position: relative; display: flex; }
+.messages { flex: 1; overflow-y: auto; padding: 1.5rem; display: flex; flex-direction: column; gap: 0.75rem; }
+.messages, .sidebar { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+.messages::-webkit-scrollbar, .sidebar::-webkit-scrollbar { width: 8px; }
+.messages::-webkit-scrollbar-thumb, .sidebar::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+/* Floats over the message pane, pinned to its bottom regardless of scroll
+   position -- shown when the user has scrolled away from the bottom (see
+   the "messages" scroll listener in app.js) so they can jump back down
+   without hunting for the end of a long reply. */
+.jump-to-bottom-btn {
+  position: absolute;
+  bottom: 1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 2.25rem;
+  height: 2.25rem;
+  padding: 0;
+  line-height: 1;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2;
+}
+.jump-to-bottom-btn[hidden] { display: none; }
+
+.msg { padding: 0.6rem 0.9rem; word-wrap: break-word; }
+
+/* Markdown-rendered content (user/assistant text only -- see renderMarkdown
+   in markdown.js; notes/images keep plain styling below). Scoped to this
+   extra class rather than bare .msg so it doesn't reach the note card's
+   own <pre>. No white-space: pre-wrap on .msg above, either -- this markup
+   handles its own line breaks (<br>/<p>) explicitly, and pre-wrap would
+   additionally preserve any incidental whitespace in it as visible gaps. */
+.msg-markdown > *:first-child { margin-top: 0; }
+.msg-markdown > *:last-child { margin-bottom: 0; }
+.msg-markdown p { margin: 0.5em 0; }
+.msg-markdown h1, .msg-markdown h2, .msg-markdown h3,
+.msg-markdown h4, .msg-markdown h5, .msg-markdown h6 { margin: 0.7em 0 0.4em; line-height: 1.3; }
+.msg-markdown h1 { font-size: 1.3em; }
+.msg-markdown h2 { font-size: 1.18em; }
+.msg-markdown h3 { font-size: 1.08em; }
+.msg-markdown h4, .msg-markdown h5, .msg-markdown h6 { font-size: 1em; }
+.msg-markdown ul, .msg-markdown ol { margin: 0.5em 0; padding-left: 1.4em; }
+.msg-markdown li { margin: 0.15em 0; }
+.msg-markdown blockquote {
+  margin: 0.5em 0;
+  padding: 0.1em 0.9em;
+  border-left: 3px solid var(--border);
+  color: var(--text-dim);
+}
+.msg-markdown hr { border: none; border-top: 1px solid var(--border); margin: 0.8em 0; }
+.msg-markdown a { color: inherit; text-decoration: underline; text-decoration-color: var(--text-dim); }
+.msg-markdown code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.88em;
+  background: rgba(127, 127, 127, 0.18);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+}
+.msg-markdown pre {
+  margin: 0.6em 0;
+  padding: 0.7em 0.9em;
+  background: rgba(127, 127, 127, 0.12);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow-x: auto;
+}
+.msg-markdown pre code { background: none; padding: 0; font-size: 0.85em; }
+.msg-user {
+  align-self: flex-end;
+  max-width: 70%;
+  background: var(--user-bubble-bg);
+  color: var(--user-bubble-text);
+  border-radius: 14px 14px 4px 14px; /* tail toward the sender's side */
+}
+/* AI replies render full-width, plain text -- no bubble, no rule of any
+   kind. Reads much better for long/complex answers than a 70%-wide bubble
+   would, and skips drawing attention with a colored border. User messages
+   keep the bubble treatment above (in --user-bubble-*, its own palette),
+   which still makes the exchange easy to scan at a glance. */
+.msg-assistant {
+  align-self: stretch;
+  max-width: none;
+  background: none;
+  padding: 0.6rem 0.9rem;
+}
+/* Notes are a distinct artifact, not a reply -- keep them a compact card
+   rather than inheriting the full-width plain-text treatment above. */
+.msg-note {
+  align-self: flex-start;
+  max-width: 70%;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.msg-note pre { white-space: pre-wrap; font-family: inherit; margin: 0.5rem 0 0; }
+.msg-image-caption { margin: 0 0 0.35rem; font-size: 0.8rem; color: var(--text-dim); }
+.msg-image img { max-width: 100%; border-radius: 10px; display: block; }
+/* Wraps the thumbnail so the @tag badge (click to insert "@imageN" into the
+   composer, see imageTagForId/insertMentionAtCursor) can sit on top of it
+   without affecting the image's own sizing rules above. */
+.msg-image-wrap { position: relative; display: inline-block; max-width: 100%; }
+.msg-image-tag {
+  position: absolute;
+  top: 0.4rem;
+  left: 0.4rem;
+  padding: 0.15rem 0.55rem;
+  border: none;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1.4;
+  cursor: pointer;
+  box-shadow: none;
+}
+.msg-image-tag:hover { background: rgba(0, 0, 0, 0.75); }
+/* A user-uploaded image is its own thing, not a chat bubble -- it inherited
+   .msg-user's colored background/border-radius (meant for text) by sharing
+   that class, which made it look boxed-in. Let it float free instead,
+   still right-aligned/sized like the rest of the user's messages. Higher
+   specificity than .msg-user (2 classes vs. 1) so this wins regardless of
+   rule order. */
+.msg-image.msg-user {
+  background: none;
+  color: var(--text-dim);
+  padding: 0;
+  border-radius: 0;
+}
+
+/* Tap-to-reveal timestamp/copy/edit row under a plain user text bubble.
+   The wrap (not the bubble) carries the 70%-width/right-alignment now, so
+   the bubble itself just fills it -- otherwise nesting two 70%-max-width
+   elements would compound into ~49%. */
+.msg-wrap { display: flex; flex-direction: column; align-self: flex-end; max-width: 70%; gap: 0.3rem; }
+.msg-wrap .msg-user { max-width: 100%; cursor: pointer; }
+/* Editing breaks out of the bubble's 70%-width constraint into a full-width
+   card -- a cramped narrow textarea (the old inline-edit behavior) was hard
+   to read/type in, especially for longer messages. Higher specificity than
+   the mobile 88%-width override below, so it wins there too regardless of
+   source order. */
+.msg-wrap.editing { max-width: none; width: 100%; align-self: stretch; }
+/* Always laid out (space reserved) rather than display:none -- toggling
+   opacity/visibility instead of display means revealing this row fades it
+   in without shifting every message below it down. */
+.msg-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end; /* hug the right edge, under the right-aligned bubble */
+  gap: 0.5rem;
+  padding: 0 0.3rem;
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.15s ease, visibility 0.15s ease;
+}
+.msg-wrap.expanded .msg-actions { opacity: 1; visibility: visible; }
+.msg-timestamp { white-space: nowrap; }
+.msg-action-btn {
+  width: 1.4rem; height: 1.4rem;
+  padding: 0;
+  line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+  background: none;
+  box-shadow: none;
+  border-radius: 4px;
+  color: var(--text-dim);
+}
+/* (hover: hover) excludes touchscreens -- iOS Safari otherwise latches
+   :hover on after a tap and holds it until you tap elsewhere, making a
+   just-tapped icon look permanently "stuck" highlighted. */
+@media (hover: hover) {
+  .msg-action-btn:hover { color: var(--text); background: var(--bg-elevated); filter: none; }
+}
+/* Copy button holds both icons at all times; a class toggles which shows
+   (see copyMessageText in app.js) instead of swapping .innerHTML. */
+.msg-action-btn .icon-check { display: none; }
+.msg-action-btn.copied .icon-copy { display: none; }
+.msg-action-btn.copied .icon-check { display: inline-flex; }
+
+/* Copy/retry row under an AI reply -- always visible (no tap-to-reveal;
+   plenty of room under the full-width plain-text layout), except while the
+   reply is still the bouncing "thinking" dots or has no text yet. */
+.msg-wrap-assistant { display: flex; flex-direction: column; align-self: stretch; }
+/* Which model actually answered, above the reply text. :empty keeps it
+   from reserving space (and popping in with a layout jump) before the
+   model event arrives -- see handleEvent in app.js. */
+.msg-model-label {
+  padding: 0 0.9rem;
+  font-size: 0.72rem;
+  color: var(--text-dim);
+}
+.msg-model-label:empty { display: none; }
+.msg-actions-assistant {
+  justify-content: flex-start;
+  padding: 0 0.9rem;
+  opacity: 1;
+  visibility: visible;
+}
+.msg-wrap-assistant .msg.thinking + .msg-actions-assistant { opacity: 0; visibility: hidden; }
+.msg-assistant.msg-error { color: var(--danger); font-style: italic; }
+
+.msg-edit-textarea {
+  width: 100%;
+  background: var(--bg-elevated);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 0.6rem 0.9rem;
+  font-family: inherit;
+  font-size: 16px; /* avoid iOS zoom-on-focus */
+  resize: vertical;
+  min-height: 3.5rem;
+}
+.msg-edit-textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.msg-edit-controls { display: flex; gap: 0.5rem; align-self: flex-end; }
+.msg-edit-controls button { font-size: 0.8rem; padding: 0.3rem 0.7rem; }
+
+.msg-assistant.thinking { display: flex; align-items: center; gap: 0.3rem; }
+.msg-assistant.thinking .dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--accent-2);
+  animation: mauso-thinking 1.4s infinite ease-in-out both;
+}
+.msg-assistant.thinking .dot:nth-child(1) { animation-delay: -0.32s; }
+.msg-assistant.thinking .dot:nth-child(2) { animation-delay: -0.16s; }
+@keyframes mauso-thinking {
+  0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+  40% { transform: scale(1); opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .msg-assistant.thinking .dot { animation: none; opacity: 0.7; }
+}
+
+.tool-status { align-self: flex-start; color: var(--text-dim); font-size: 0.85rem; font-style: italic; }
+.tool-status.error { color: var(--danger); }
+
+/* ---------- Composer: text box, with controls in a row underneath it
+   (attach / model picker / send) instead of beside it -- avoids the
+   fiddly single-row height/baseline alignment entirely. ---------- */
+.composer {
+  position: relative; /* anchors .mention-dropdown, see below */
+  margin: 0 1.5rem 1.25rem;
+  padding: 0.65rem 0.75rem 0.6rem;
+  background: var(--bg-elevated);
+  border-radius: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  flex-shrink: 0;
+}
+.composer:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Popover listing images typeable as "@imageN" -- opened by onComposerInput
+   when the caret sits in an "@..." token, positioned to float above the
+   composer pill rather than push its layout around. */
+.mention-dropdown {
+  position: absolute;
+  left: 0.75rem;
+  right: 0.75rem;
+  bottom: 100%;
+  margin-bottom: 0.5rem;
+  max-height: 220px;
+  overflow-y: auto;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0.3rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+}
+.mention-dropdown[hidden] { display: none; }
+.mention-item {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.3rem 0.45rem;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  font-size: 0.88rem;
+  box-shadow: none;
+}
+.mention-item img { width: 28px; height: 28px; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); flex-shrink: 0; }
+.mention-item.selected, .mention-item:hover { background: var(--bg-panel); }
+.composer-input {
+  background: transparent;
+  border: none;
+  padding: 0.3rem 0.4rem;
+  color: var(--text);
+  width: 100%;
+  font-size: 16px; /* avoid iOS zoom-on-focus */
+}
+.composer-input:focus { outline: none; } /* the whole pill gets the focus ring instead, see .composer:focus-within */
+#attach-status:empty { display: none; }
+.composer .hint { padding: 0 0.4rem; margin: 0; }
+.attach-preview {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0 0.4rem;
+}
+/* The browser's own [hidden] { display: none } rule lives in the
+   user-agent stylesheet, which always loses to an author rule of equal or
+   lower specificity like the bare .attach-preview above -- so toggling the
+   hidden property in JS silently did nothing. Spelling it out here (same
+   author origin, more specific) is what actually wins. */
+.attach-preview[hidden] { display: none; }
+.attach-thumb {
+  position: relative;
+  width: 44px;
+  height: 44px;
+}
+.attach-thumb img {
+  width: 44px; height: 44px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  display: block;
+}
+.attach-thumb-loading img { animation: attach-pulse 1.2s ease-in-out infinite; }
+@keyframes attach-pulse { 0%, 100% { opacity: 0.25; } 50% { opacity: 0.55; } }
+.attach-remove-btn {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 1.4rem; height: 1.4rem;
+  padding: 0;
+  line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 50%;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 1rem;
+  box-shadow: none;
+}
+@media (hover: hover) {
+  .attach-remove-btn:hover { color: var(--text); filter: none; }
+}
+.composer-controls { display: flex; align-items: center; gap: 0.4rem; }
+.composer-model {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  font-size: 0.82rem;
+  padding: 0.3rem 0.2rem;
+}
+.attach-btn {
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+  width: 2rem; height: 2rem;
+  padding: 0;
+  line-height: 1;
+  border: none; border-radius: 6px;
+  background: transparent; cursor: pointer; font-size: 1.05rem;
+  box-shadow: none;
+}
+.attach-btn:hover { filter: brightness(1.3); background: var(--bg-panel); }
+.btn-send {
+  flex-shrink: 0;
+  margin-left: auto;
+  width: 2.25rem; height: 2.25rem;
+  padding: 0;
+  line-height: 1;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--accent-text);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1.1rem;
+  box-shadow: 2px 2px 0 var(--text);
+}
+.btn-send:active { box-shadow: 0 0 0 var(--text); }
+.btn-send.stop-mode { background: var(--text-dim); }
+
+.file-row {
+  display: flex; align-items: center; gap: 1rem;
+  padding: 0.5rem 0; border-bottom: 1px solid var(--border);
+}
+.file-name { font-weight: 600; }
+.file-meta { color: var(--text-dim); font-size: 0.85rem; flex: 1; }
+
+.note-row { flex-wrap: wrap; }
+.note-row > span { flex: 1 1 100%; line-height: 1.4; }
+.note-editor-cols {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;
+  align-items: start;
+}
+.note-editor-cols textarea { width: 100%; font-family: inherit; resize: vertical; }
+.note-editor > button { margin: 0.5rem 0.5rem 0 0; }
+.note-preview-label { display: block; margin-bottom: 0.3rem; }
+.note-preview {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.6rem 0.9rem;
+  min-height: 12rem;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 768px) {
+  .note-editor-cols { grid-template-columns: 1fr; }
+}
+
+/* ---------- Mobile ---------- */
+@media (max-width: 768px) {
+  .page { padding: 1.25rem; padding-top: 3.75rem; } /* clearance for the fixed ☰ toggle */
+
+  /* Sidebar becomes a slide-out drawer over the whole viewport instead of
+     a fixed 260px column, which otherwise left almost no room for the
+     chat panel on a phone-width screen. */
+  .sidebar-toggle {
+    display: flex;
+    align-items: center; justify-content: center;
+    position: absolute;
+    top: 0.75rem; left: 0.75rem;
+    z-index: 80;
+    width: 2.25rem; height: 2.25rem;
+    padding: 0; /* same fixed-size-vs-inherited-button-padding fix as .theme-toggle */
+    line-height: 1;
+    border-radius: 6px;
+    border: none;
+    background: var(--bg-elevated);
+    color: var(--text);
+    font-size: 1.1rem;
+    box-shadow: none;
+  }
+  .sidebar-toggle:hover { filter: brightness(1.15); }
+  .sidebar {
+    position: fixed;
+    top: 0; bottom: 0; left: 0;
+    width: min(85vw, 320px);
+    z-index: 90;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+    box-shadow: 4px 0 16px rgba(0, 0, 0, 0.5);
+  }
+  .sidebar.open { transform: translateX(0); }
+  .sidebar-backdrop.open {
+    display: block;
+    position: fixed; inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    z-index: 85;
+  }
+
+  .chat-panel { width: 100%; }
+  /* height, not just padding -- the bar has to be at least as tall as the
+     fixed ☰ button's full footprint (0.75rem top offset + 2.25rem tall),
+     or the button's bottom edge spills into the messages below it. */
+  .chat-title-bar { height: 3rem; padding: 0 1rem 0 3.5rem; }
+  .messages { padding: 1rem; }
+  .composer { margin: 0 1rem 1rem; }
+  .composer-model { max-width: 27vw; }
+  .msg-user, .msg-note, .msg-wrap { max-width: 88%; } /* .msg-assistant stays full-width -- see above */
+}

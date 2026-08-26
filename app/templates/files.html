@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title_suffix %} · Files{% endblock %}
+
+{% block sidebar_extra %}
+<button id="new-convo-btn" class="btn-primary" type="button">+ New conversation</button>
+<div id="convo-list" class="convo-list"></div>
+{% endblock %}
+
+{% block sidebar_footer_extra %}
+<button id="lock-btn" class="btn-lock" type="button" title="Clear the cached key and require the passphrase again">
+  <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+  Lock
+</button>
+{% endblock %}
+
+{% block content %}
+<div class="page">
+  <h2>Files</h2>
+  <p class="hint">
+    Uploaded here for the <strong>search_documents</strong> skill (RAG). Unlike
+    conversation history, these are <strong>not</strong> end-to-end encrypted --
+    the backend has to read, chunk, and embed them to make them searchable, so
+    they're stored in plaintext on the server, the same way every other stack
+    on this host stores its data. Don't upload anything here you wouldn't put
+    in any other self-hosted app on this box.
+  </p>
+  <form id="upload-form">
+    <input id="file-input" type="file" multiple accept=".txt,.md,.markdown,.csv,.json,.log,.pdf">
+    <button type="submit">Upload</button>
+  </form>
+  <p id="upload-status" class="hint"></p>
+  <div id="file-list"></div>
+</div>
+<script src="{{ static_url('files.js') }}"></script>
+<script type="module" src="{{ static_url('sidebar_history.js') }}"></script>
+{% endblock %}

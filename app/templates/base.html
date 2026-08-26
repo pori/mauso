@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>mauso{% block title_suffix %}{% endblock %}</title>
+  <script>
+    // Must stay inline and synchronous (not moved into theme.js) so the
+    // right theme is set before first paint -- otherwise the page flashes
+    // the wrong one on load whenever the saved choice differs from the
+    // system default.
+    (function () {
+      var saved = localStorage.getItem("mauso_theme");
+      if (saved === "light" || saved === "dark") {
+        document.documentElement.setAttribute("data-theme", saved);
+      }
+    })();
+  </script>
+  <link rel="stylesheet" href="{{ static_url('style.css') }}">
+</head>
+<body>
+  <button id="sidebar-toggle" class="sidebar-toggle" aria-label="Toggle menu" type="button">
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+  </button>
+  <div id="sidebar-backdrop" class="sidebar-backdrop"></div>
+  <div class="app-shell">
+    <aside id="sidebar" class="sidebar">
+      <a class="brand" href="/">mauso</a>
+      <nav class="sidebar-nav">
+        <a href="/files" class="{% if request.url.path == '/files' %}active{% endif %}">Files</a>
+        <a href="/notes" class="{% if request.url.path == '/notes' %}active{% endif %}">Notes</a>
+        <a href="/profiles" class="{% if request.url.path == '/profiles' %}active{% endif %}">Profiles</a>
+        <a href="/settings" class="{% if request.url.path == '/settings' %}active{% endif %}">Settings</a>
+      </nav>
+      {% block sidebar_extra %}{% endblock %}
+      <div class="sidebar-footer">
+        {% block sidebar_footer_extra %}{% endblock %}
+        <button id="theme-toggle" class="theme-toggle" type="button" title="Toggle light/dark"></button>
+      </div>
+    </aside>
+    <main>
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+  <script src="{{ static_url('theme.js') }}"></script>
+</body>
+</html>

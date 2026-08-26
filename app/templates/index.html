@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title_suffix %} · Chat{% endblock %}
+
+{% block sidebar_extra %}
+<button id="new-convo-btn" class="btn-primary">+ New conversation</button>
+<div id="convo-list" class="convo-list"></div>
+<div class="active-files-panel">
+  <h4>Active documents</h4>
+  <div id="active-files"></div>
+</div>
+{% endblock %}
+
+{% block sidebar_footer_extra %}
+<button id="lock-btn" class="btn-lock" type="button" title="Clear the cached key and require the passphrase again">
+  <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+  Lock
+</button>
+{% endblock %}
+
+{% block content %}
+<div id="unlock-overlay" class="overlay">
+  <form id="unlock-form" class="unlock-box">
+    <h2>Unlock mauso</h2>
+    <p id="unlock-mode-label"></p>
+    <input id="passphrase-input" type="password" placeholder="Passphrase" autocomplete="off" required>
+    <div id="unlock-confirm-row">
+      <input id="passphrase-confirm-input" type="password" placeholder="Confirm passphrase" autocomplete="off">
+    </div>
+    <p id="unlock-error" class="error" style="display:none"></p>
+    <button type="submit">Unlock</button>
+    <p class="hint">Your passphrase never leaves this browser. If you forget it, encrypted history cannot be recovered. Once unlocked, you won't be asked again until you tap Lock or close this tab.</p>
+  </form>
+</div>
+
+<section class="chat-panel">
+  <div class="chat-title-bar"><span id="chat-title"></span></div>
+  <div class="messages-wrap">
+    <div id="messages" class="messages"></div>
+    <button id="jump-to-bottom-btn" class="jump-to-bottom-btn" type="button" title="Scroll to bottom" hidden>
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+    </button>
+  </div>
+  <form id="send-form" class="composer">
+    <input id="message-input" type="text" placeholder="Message mauso... (@ to reference an image)" autocomplete="off" class="composer-input">
+    <div id="mention-dropdown" class="mention-dropdown" hidden></div>
+    <div id="attach-preview" class="attach-preview" hidden></div>
+    <p id="attach-status" class="hint"></p>
+    <div class="composer-controls">
+      <label class="attach-btn" title="Attach image(s) (for the edit_image skill) -- or paste an image straight into the message box">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+        <input id="attach-input" type="file" accept="image/*" multiple hidden>
+      </label>
+      <select id="profile-picker" class="composer-model" title="Profile"></select>
+      <select id="model-picker" class="composer-model"></select>
+      <button id="send-btn" type="submit" class="btn-send" aria-label="Send">
+        <svg id="send-icon-send" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
+        <svg id="send-icon-stop" viewBox="0 0 24 24" width="14" height="14" fill="currentColor" stroke="none" style="display:none"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
+      </button>
+    </div>
+  </form>
+</section>
+
+<script type="module" src="{{ static_url('app.js') }}"></script>
+{% endblock %}

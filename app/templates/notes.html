@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title_suffix %} · Notes{% endblock %}
+
+{% block sidebar_extra %}
+<button id="new-convo-btn" class="btn-primary" type="button">+ New conversation</button>
+<div id="convo-list" class="convo-list"></div>
+{% endblock %}
+
+{% block sidebar_footer_extra %}
+<button id="lock-btn" class="btn-lock" type="button" title="Clear the cached key and require the passphrase again">
+  <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+  Lock
+</button>
+{% endblock %}
+
+{% block content %}
+<div class="page">
+  <h2>Notes</h2>
+  <p class="hint">
+    Saved notes the AI can look up with the <strong>search_notes</strong> skill when
+    you ask it to reference something you've written down here. Unlike conversation
+    history, these are <strong>not</strong> end-to-end encrypted -- they're stored in
+    plaintext on the server so the backend can search them, the same tradeoff as
+    uploaded Files. Don't put anything here you wouldn't put in any other self-hosted
+    app on this box. (This is separate from the AI's own in-chat "note" replies,
+    which stay in the encrypted conversation and are never saved here.)
+  </p>
+  <div id="note-list"></div>
+  <form id="note-form" class="note-editor">
+    <input type="hidden" id="note_id">
+    <label>Import a .md/.txt file <span class="hint">(fills in the fields below as a new note -- nothing is saved until you click Add note)</span>
+      <input id="note-import-input" type="file" accept=".md,.markdown,.txt">
+    </label>
+    <label>Title
+      <input id="note_title" type="text" placeholder="e.g. Wifi password, recipe, project ideas" required>
+    </label>
+    <div class="note-editor-cols">
+      <label>Content (Markdown)
+        <textarea id="note_content" rows="12" placeholder="Write the note here..."></textarea>
+      </label>
+      <div class="note-preview-col">
+        <span class="note-preview-label hint">Preview</span>
+        <div id="note-preview" class="note-preview"></div>
+      </div>
+    </div>
+    <button type="submit" id="note-submit-btn">Add note</button>
+    <button type="button" id="note-cancel-btn" style="display:none">Cancel edit</button>
+    <button type="button" id="note-download-md-btn">Download .md</button>
+    <button type="button" id="note-download-txt-btn">Download .txt</button>
+  </form>
+</div>
+<script type="module" src="{{ static_url('notes.js') }}"></script>
+<script type="module" src="{{ static_url('sidebar_history.js') }}"></script>
+{% endblock %}
