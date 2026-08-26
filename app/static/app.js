@@ -659,8 +659,18 @@ function detectMentionQuery(input) {
   return { start, end: caret, query: value.slice(start + 1, caret) };
 }
 
+// Grows the composer textarea to fit its content (CSS max-height + overflow
+// caps it beyond that). Must be called manually after any programmatic
+// `.value =` assignment -- those don't fire an "input" event.
+function autoResizeComposerInput() {
+  const input = el("message-input");
+  input.style.height = "auto";
+  input.style.height = `${input.scrollHeight}px`;
+}
+
 function onComposerInput() {
   const input = el("message-input");
+  autoResizeComposerInput();
   const mention = detectMentionQuery(input);
   if (!mention) { hideMentionDropdown(); return; }
   const query = mention.query.toLowerCase();
@@ -718,14 +728,24 @@ function selectMention(index) {
   hideMentionDropdown();
   input.focus();
   input.setSelectionRange(caret, caret);
+  autoResizeComposerInput();
 }
 
 function onComposerKeydown(e) {
-  if (!mentionState) return;
-  if (e.key === "ArrowDown") { e.preventDefault(); moveMentionSelection(1); }
-  else if (e.key === "ArrowUp") { e.preventDefault(); moveMentionSelection(-1); }
-  else if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); selectMention(mentionState.selectedIndex); }
-  else if (e.key === "Escape") { hideMentionDropdown(); }
+  if (mentionState) {
+    if (e.key === "ArrowDown") { e.preventDefault(); moveMentionSelection(1); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); moveMentionSelection(-1); }
+    else if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); selectMention(mentionState.selectedIndex); }
+    else if (e.key === "Escape") { hideMentionDropdown(); }
+    return;
+  }
+  // Textareas don't submit their form on Enter the way a text <input> did --
+  // Enter alone now sends, Shift+Enter inserts a newline like every other
+  // chat composer.
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    el("send-form").requestSubmit();
+  }
 }
 
 // Inserts "@imageN" at the current cursor position (or over the current
@@ -742,6 +762,7 @@ function insertMentionAtCursor(tag) {
   const caret = before.length + insertion.length;
   input.focus();
   input.setSelectionRange(caret, caret);
+  autoResizeComposerInput();
 }
 
 // AI replies get a copy/retry row underneath, always visible (unlike the
@@ -892,6 +913,7 @@ function saveEditMessage(m, newText) {
   currentConvo.messages.splice(idx); // drop this message and everything after it
   renderMessages();
   el("message-input").value = newText;
+  autoResizeComposerInput();
   el("send-form").requestSubmit();
 }
 
@@ -1135,6 +1157,7 @@ async function onSend(e) {
   const attachments = pendingImageAttachments;
   if (!text && !attachments.length) return;
   input.value = "";
+  autoResizeComposerInput();
   hideMentionDropdown();
   pendingImageAttachments = [];
   clearAttachPreview();

@@ -645,6 +645,11 @@ main { flex: 1; min-height: 0; display: flex; }
   color: var(--text);
   width: 100%;
   font-size: 16px; /* avoid iOS zoom-on-focus */
+  font-family: inherit;
+  line-height: 1.4;
+  resize: none; /* height is driven by autoResizeComposerInput(), not a drag handle */
+  max-height: 40vh;
+  overflow-y: auto;
 }
 .composer-input:focus { outline: none; } /* the whole pill gets the focus ring instead, see .composer:focus-within */
 #attach-status:empty { display: none; }
