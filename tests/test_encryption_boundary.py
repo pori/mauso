@@ -1,0 +1,75 @@
+"""Guards the app's defining architectural fact (see CLAUDE.md): this backend
+must never persist conversation content. There is no Message/Conversation
+table by design -- the client owns all transcript storage (encrypted, in
+IndexedDB) and the server only ever sees plaintext messages for the duration
+of a single /api/chat request, to relay onward.
+
+These tests don't prove the absence of a bug so much as make a future
+regression loud: if someone adds a table to persist chat turns, or a code
+path that writes message content to disk, one of these should fail."""
+from sqlalchemy import select
+
+from app.db import Base, SessionLocal, engine
+from app import agent, llm_client
+from app.models import AppSetting, ChatImage, Chunk, Document, Note, Profile
+
+ALL_MODELS = [AppSetting, Document, Chunk, Profile, Note, ChatImage]
+
+
+def test_no_conversation_or_message_table_exists():
+    """Static guard: the schema itself must never grow a place to put chat
+    history. A table named e.g. "message" or "conversation" appearing here
+    would mean someone started building server-side transcript storage."""
+    forbidden_substrings = ("message", "conversation", "transcript")
+    for table_name in Base.metadata.tables:
+        lowered = table_name.lower()
+        assert not any(s in lowered for s in forbidden_substrings), (
+            f"table {table_name!r} looks like conversation storage -- "
+            "conversation history must stay client-side only"
+        )
+
+
+async def _fake_chat_completion(base_url, api_key, model, messages, tools=None):
+    # Asserting on the real argument (not just returning a canned reply)
+    # matters -- a stub that ignores what it's called with can't catch a bug
+    # where the wrong (or no) messages reach the LLM call.
+    assert messages is not None
+    assert any("secret only the browser" in str(m.get("content", "")) for m in messages)
+    return {"role": "assistant", "content": "hello there"}
+
+
+async def _fake_chat_completion_stream(base_url, api_key, model, messages):
+    assert messages is not None
+    yield {"model": "fake-model", "content": "hello"}
+    yield {"model": None, "content": " there"}
+
+
+def _row_counts(db):
+    return {m.__tablename__: db.execute(select(m)).scalars().all().__len__() for m in ALL_MODELS}
+
+
+def test_chat_endpoint_writes_nothing_to_disk(client, db_session, monkeypatch):
+    """Dynamic guard: driving a full /api/chat turn (no tools enabled, so
+    only the plain chat path runs) must leave every table's row count
+    unchanged -- the plaintext messages in the request body must never touch
+    the database."""
+    monkeypatch.setattr(llm_client, "chat_completion", _fake_chat_completion)
+    monkeypatch.setattr(llm_client, "chat_completion_stream", _fake_chat_completion_stream)
+
+    before = _row_counts(db_session)
+
+    resp = client.post(
+        "/api/chat",
+        json={
+            "messages": [
+                {"role": "user", "content": "This is a secret only the browser should ever store."},
+            ],
+            "enabled_tools": [],
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.text
+    assert "hello there" in body or "hello" in body  # streamed final answer came through
+
+    after = _row_counts(db_session)
+    assert after == before

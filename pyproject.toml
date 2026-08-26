@@ -1,0 +1,7 @@
+[tool.mutmut]
+source_paths = ["app"]
+# Only mutate lines the test suite actually exercises -- with a thin test
+# suite, mutating everything would just report a wall of "survived" on code
+# with zero coverage, which isn't a meaningful signal. As coverage grows,
+# more of the app comes under the gate for free.
+mutate_only_covered_lines = true

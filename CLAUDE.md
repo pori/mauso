@@ -12,11 +12,22 @@ mauso: an agentic AI chat PoC. Point it at any OpenAI-compatible LLM endpoint an
 
 ## Commands
 
-No test suite and no linter are configured. The only pre-rebuild sanity check used in this project:
+No linter is configured. Pre-rebuild sanity checks used in this project:
 
 ```bash
 python3 -m py_compile app/*.py app/**/*.py
+pip install -r requirements-dev.txt   # once, into a venv
+pytest
 ```
+
+The test suite (`tests/`) uses FastAPI's `TestClient` against a throwaway sqlite file (`tests/test.db`, never the real `/data/mauso.db`) — most tests don't need a Docker rebuild to run. `tests/conftest.py` sets `DB_PATH` before any `app.*` module is imported and gives every test a fresh, empty schema. `tests/test_encryption_boundary.py` is the load-bearing one: it asserts no `Message`/`Conversation`-shaped table ever gets added to `models.py`, and that a full `/api/chat` turn (with the LLM client mocked) leaves every table's row count unchanged — a regression there means conversation content started touching disk.
+
+```bash
+python3 scripts/mutation_gate.py            # gate: fails only on mutants surviving in files *this diff* touched
+python3 scripts/mutation_gate.py --full      # audit: fails on any surviving mutant across all of app/
+```
+
+Mutation-testing (`mutmut`, pinned in `requirements-dev.txt`, config in `pyproject.toml`'s `[tool.mutmut]`, `mutate_only_covered_lines = true` so it only mutates lines the suite actually exercises) backs `scripts/mutation_gate.py`. The default mode is what a per-task gate should run: it fails only when a mutant survives in an `app/*.py` file the current diff (vs `--base-ref`, default `main`, plus any uncommitted/staged changes) actually touched — pre-existing gaps in code a task didn't touch don't block it. `--full` is for a periodic audit of the whole tree, not per-task gating. Known caveat: because coverage collection has to trace through `agent.py`'s async generator, the exact set of mutants mutmut generates has been observed to vary slightly between otherwise-identical runs (~1-8 survivors in `--full` mode across repeated runs against the same code) — treat a `--full` survivor list as a lead to investigate, not a precise count.
 
 Run locally:
 
