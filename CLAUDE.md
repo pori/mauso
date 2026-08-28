@@ -29,6 +29,12 @@ python3 scripts/mutation_gate.py --full      # audit: fails on any surviving mut
 
 Mutation-testing (`mutmut`, pinned in `requirements-dev.txt`, config in `pyproject.toml`'s `[tool.mutmut]`, `mutate_only_covered_lines = true` so it only mutates lines the suite actually exercises) backs `scripts/mutation_gate.py`. The default mode is what a per-task gate should run: it fails only when a mutant survives in an `app/*.py` file the current diff (vs `--base-ref`, default `main`, plus any uncommitted/staged changes) actually touched — pre-existing gaps in code a task didn't touch don't block it. `--full` is for a periodic audit of the whole tree, not per-task gating. Known caveat: because coverage collection has to trace through `agent.py`'s async generator, the exact set of mutants mutmut generates has been observed to vary slightly between otherwise-identical runs (~1-8 survivors in `--full` mode across repeated runs against the same code) — treat a `--full` survivor list as a lead to investigate, not a precise count.
 
+```bash
+python3 scripts/dependency_audit.py         # gate: fails if pip-audit finds a known CVE in requirements.txt
+```
+
+`pip-audit` (pinned in `requirements-dev.txt`) checks `requirements.txt` against the PyPI/OSV vulnerability feeds — like the mutation gate, this runs locally rather than through a hosted SaaS scanner; it only ever sends package names/versions over the network, never this repo's source. Known current finding, not yet fixable: `starlette` (pulled in transitively by `fastapi==0.115.6`, which pins `starlette<0.42.0`) has several disclosed CVEs whose fixes all land in `>=0.42.0` and later `1.x` releases — none of the fastapi-compatible `0.4x` starlette versions carry a fix. Resolving it means bumping `fastapi` itself to a release compatible with a patched starlette, which is a larger, separate upgrade (potential API/behavior changes) rather than a dependency-pin bump, so it's tracked as a known gap instead of silently patched here.
+
 Run locally:
 
 ```bash
