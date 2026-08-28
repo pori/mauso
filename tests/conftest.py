@@ -4,8 +4,11 @@ DB_PATH once at import time."""
 import os
 from pathlib import Path
 
+from cryptography.fernet import Fernet
+
 TEST_DB_PATH = Path(__file__).resolve().parent / "test.db"
 os.environ["DB_PATH"] = str(TEST_DB_PATH)
+os.environ.setdefault("MAUSO_SECRET_KEY", Fernet.generate_key().decode())
 
 import pytest
 from fastapi.testclient import TestClient
