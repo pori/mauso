@@ -745,6 +745,16 @@ main { flex: 1; min-height: 0; display: flex; }
 
 .note-row { flex-wrap: wrap; }
 .note-row > span { flex: 1 1 100%; line-height: 1.4; }
+.note-tag-chip {
+  display: inline-block;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.05rem 0.55rem;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+.note-tag-filter-label { display: block; margin: 0.75rem 0; }
 .note-editor-cols {
   display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;
   align-items: start;

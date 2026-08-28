@@ -5,11 +5,15 @@ import { renderMarkdown } from "./markdown.js";
 
 const titleEl = document.getElementById("note_title");
 const contentEl = document.getElementById("note_content");
+const tagsEl = document.getElementById("note_tags");
 const previewEl = document.getElementById("note-preview");
 const idEl = document.getElementById("note_id");
 const submitBtn = document.getElementById("note-submit-btn");
 const cancelBtn = document.getElementById("note-cancel-btn");
 const importInput = document.getElementById("note-import-input");
+const tagFilterEl = document.getElementById("note-tag-filter");
+
+let allNotes = [];
 
 function updatePreview() {
   previewEl.innerHTML = renderMarkdown(contentEl.value);
@@ -64,6 +68,7 @@ function resetForm() {
   idEl.value = "";
   titleEl.value = "";
   contentEl.value = "";
+  tagsEl.value = "";
   updatePreview();
   submitBtn.textContent = "Add note";
   cancelBtn.style.display = "none";
@@ -74,13 +79,29 @@ function formatDate(iso) {
   return new Date(iso).toLocaleString();
 }
 
-async function loadNotes() {
-  const resp = await fetch("/api/notes");
-  const notes = await resp.json();
+function populateTagFilter(notes) {
+  const tags = new Set();
+  for (const n of notes) {
+    for (const t of n.tags || []) tags.add(t);
+  }
+  const current = tagFilterEl.value;
+  tagFilterEl.innerHTML = '<option value="">All tags</option>';
+  for (const t of [...tags].sort()) {
+    const opt = document.createElement("option");
+    opt.value = t;
+    opt.textContent = t;
+    tagFilterEl.appendChild(opt);
+  }
+  if (tags.has(current)) tagFilterEl.value = current;
+}
+
+function renderNoteList() {
+  const filterTag = tagFilterEl.value;
+  const notes = filterTag ? allNotes.filter((n) => (n.tags || []).includes(filterTag)) : allNotes;
   const list = document.getElementById("note-list");
   list.innerHTML = "";
   if (notes.length === 0) {
-    list.innerHTML = '<p class="hint">No saved notes yet.</p>';
+    list.innerHTML = `<p class="hint">${filterTag ? "No notes with that tag." : "No saved notes yet."}</p>`;
     return;
   }
   for (const n of notes) {
@@ -89,7 +110,8 @@ async function loadNotes() {
 
     const label = document.createElement("span");
     const snippet = (n.content_markdown || "").replace(/\s+/g, " ").trim().slice(0, 80);
-    label.innerHTML = `<strong>${n.title}</strong><br><span class="hint">${formatDate(n.updated_at)}${snippet ? " · " + snippet : ""}</span>`;
+    const tagsHtml = (n.tags || []).map((t) => `<span class="note-tag-chip">${t}</span>`).join(" ");
+    label.innerHTML = `<strong>${n.title}</strong> ${tagsHtml}<br><span class="hint">${formatDate(n.updated_at)}${snippet ? " · " + snippet : ""}</span>`;
     row.appendChild(label);
 
     const editBtn = document.createElement("button");
@@ -99,6 +121,7 @@ async function loadNotes() {
       idEl.value = n.id;
       titleEl.value = n.title;
       contentEl.value = n.content_markdown || "";
+      tagsEl.value = (n.tags || []).join(", ");
       updatePreview();
       submitBtn.textContent = "Save note";
       cancelBtn.style.display = "";
@@ -144,7 +167,7 @@ cancelBtn.addEventListener("click", resetForm);
 document.getElementById("note-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const id = idEl.value;
-  const body = { title: titleEl.value, content_markdown: contentEl.value };
+  const body = { title: titleEl.value, content_markdown: contentEl.value, tags: tagsEl.value };
   await fetch(id ? `/api/notes/${id}` : "/api/notes", {
     method: id ? "PUT" : "POST",
     headers: { "Content-Type": "application/json" },
@@ -153,6 +176,15 @@ document.getElementById("note-form").addEventListener("submit", async (e) => {
   resetForm();
   await loadNotes();
 });
+
+tagFilterEl.addEventListener("change", renderNoteList);
+
+async function loadNotes() {
+  const resp = await fetch("/api/notes");
+  allNotes = await resp.json();
+  populateTagFilter(allNotes);
+  renderNoteList();
+}
 
 updatePreview();
 loadNotes();

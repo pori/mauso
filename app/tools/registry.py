@@ -77,6 +77,7 @@ TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "What to search for. Leave empty to list all saved notes."},
+                    "tag": {"type": "string", "description": "Restrict results to notes carrying this exact tag. Optional."},
                 },
             },
         },
