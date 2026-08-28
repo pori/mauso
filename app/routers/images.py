@@ -107,3 +107,13 @@ def get_chat_image(image_id: int, db: Session = Depends(get_db)):
     if not record:
         raise HTTPException(404, "Not found")
     return Response(content=read_chat_image_bytes(record), media_type=record.content_type or "image/png")
+
+
+@router.delete("/api/chat-images/{image_id}")
+def delete_chat_image(image_id: int, db: Session = Depends(get_db)):
+    record = db.get(ChatImage, image_id)
+    if not record:
+        raise HTTPException(404, "Not found")
+    db.delete(record)
+    db.commit()
+    return {"ok": True}
