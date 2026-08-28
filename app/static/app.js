@@ -136,7 +136,8 @@ async function onUnlockSubmit(e) {
     }
   }
   const salt = await Crypto.getOrCreateSalt();
-  const derived = await Crypto.deriveKey(passphrase, salt);
+  const iterations = await Crypto.getKdfIterations();
+  const derived = await Crypto.deriveKey(passphrase, salt, iterations);
   const verdict = await Crypto.verifyPassphrase(derived);
   if (verdict === false) {
     showUnlockError("Wrong passphrase.");

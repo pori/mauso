@@ -23,6 +23,26 @@ const DB_NAME = "mauso";
 const DB_VERSION = 1;
 const SESSION_KEY_STORAGE = "mauso_session_key_bits";
 
+// PBKDF2-HMAC-SHA256 iteration count. 600,000 matches OWASP's current
+// Password Storage Cheat Sheet minimum (unchanged since its Dec 2022
+// revision, last checked here Aug 2026). The PREVIOUS value here was
+// 250,000 -- since the derived key depends on this number, bumping it
+// changes the key for the SAME passphrase+salt, which would make every
+// already-encrypted IndexedDB conversation undecryptable for anyone
+// upgrading in place. So this isn't just a constant bump: the iteration
+// count used for a given vault is now persisted alongside its salt (see
+// getOrCreateSalt/getKdfIterations below) the first time either is read
+// after this change -- a brand-new vault gets DEFAULT_ITERATIONS, while a
+// pre-existing one (salt already on disk, no count recorded yet) gets
+// backfilled with the old value it was actually derived with, so existing
+// conversations keep decrypting. This does NOT retroactively strengthen an
+// existing vault's KDF -- that would require re-deriving the key and
+// re-encrypting every stored conversation under it (a "rotate passphrase"
+// feature that doesn't exist yet), so existing installs stay at the old
+// iteration count until such a migration is built.
+const DEFAULT_ITERATIONS = 600000;
+const LEGACY_ITERATIONS = 250000;
+
 function openDB() {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
@@ -68,10 +88,28 @@ function b64ToBuf(b64) {
 export async function getOrCreateSalt() {
   const db = await openDB();
   const existing = await reqToPromise(tx(db, "meta", "readonly").get("salt"));
-  if (existing) return b64ToBuf(existing.value);
+  if (existing) {
+    const existingIterations = await reqToPromise(tx(db, "meta", "readonly").get("kdfIterations"));
+    if (!existingIterations) {
+      // Pre-existing vault from before kdfIterations was recorded -- it was
+      // derived with the old hardcoded count, so persist that (not
+      // DEFAULT_ITERATIONS) to keep decrypting its conversations correctly.
+      await reqToPromise(tx(db, "meta", "readwrite").put({ key: "kdfIterations", value: LEGACY_ITERATIONS }));
+    }
+    return b64ToBuf(existing.value);
+  }
   const salt = crypto.getRandomValues(new Uint8Array(16));
   await reqToPromise(tx(db, "meta", "readwrite").put({ key: "salt", value: bufToB64(salt) }));
+  await reqToPromise(tx(db, "meta", "readwrite").put({ key: "kdfIterations", value: DEFAULT_ITERATIONS }));
   return salt.buffer;
+}
+
+// Reads back the iteration count getOrCreateSalt() persisted for this
+// vault -- call after getOrCreateSalt() so the backfill above has run.
+export async function getKdfIterations() {
+  const db = await openDB();
+  const existing = await reqToPromise(tx(db, "meta", "readonly").get("kdfIterations"));
+  return existing ? existing.value : DEFAULT_ITERATIONS;
 }
 
 export async function hasExistingSalt() {
@@ -83,13 +121,13 @@ export async function hasExistingSalt() {
 // Extractable on purpose -- immediately after deriving, the caller caches
 // this key for the session (see cacheKeyForSession). Everywhere else that
 // hands out a key (restoreKeyFromSession) re-imports it non-extractable.
-export async function deriveKey(passphrase, saltBuf) {
+export async function deriveKey(passphrase, saltBuf, iterations = DEFAULT_ITERATIONS) {
   const enc = new TextEncoder();
   const baseKey = await crypto.subtle.importKey(
     "raw", enc.encode(passphrase), "PBKDF2", false, ["deriveKey"],
   );
   return crypto.subtle.deriveKey(
-    { name: "PBKDF2", salt: saltBuf, iterations: 250000, hash: "SHA-256" },
+    { name: "PBKDF2", salt: saltBuf, iterations, hash: "SHA-256" },
     baseKey,
     { name: "AES-GCM", length: 256 },
     true,
