@@ -27,16 +27,35 @@ def run(args: dict) -> dict:
     return {"title": title, "content_markdown": content}
 
 
+def normalize_tags(raw: str) -> str:
+    """Comma-separated tag input -> deduped/trimmed/lowercased, comma-joined
+    for storage on Note.tags."""
+    seen = []
+    for part in (raw or "").split(","):
+        tag = part.strip().lower()
+        if tag and tag not in seen:
+            seen.append(tag)
+    return ",".join(seen)
+
+
+def parse_tags(raw: str) -> list:
+    """Note.tags storage string -> list of tags."""
+    return [t for t in (raw or "").split(",") if t]
+
+
 def search(args: dict, db: Session) -> dict:
     query = (args.get("query") or "").strip().lower()
+    tag = (args.get("tag") or "").strip().lower()
     notes = db.query(Note).order_by(Note.updated_at.desc()).all()
     if query:
         notes = [n for n in notes if query in n.title.lower() or query in n.content_markdown.lower()]
+    if tag:
+        notes = [n for n in notes if tag in parse_tags(n.tags)]
     if not notes:
         return {"results": [], "note": "No saved notes matched (or none exist yet -- see the Notes page)."}
     return {
         "results": [
-            {"id": n.id, "title": n.title, "content_markdown": n.content_markdown}
+            {"id": n.id, "title": n.title, "content_markdown": n.content_markdown, "tags": parse_tags(n.tags)}
             for n in notes[:MAX_RESULTS]
         ],
     }

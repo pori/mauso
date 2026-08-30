@@ -25,6 +25,11 @@
     app on this box. (This is separate from the AI's own in-chat "note" replies,
     which stay in the encrypted conversation and are never saved here.)
   </p>
+  <label class="note-tag-filter-label">Filter by tag
+    <select id="note-tag-filter">
+      <option value="">All tags</option>
+    </select>
+  </label>
   <div id="note-list"></div>
   <form id="note-form" class="note-editor">
     <input type="hidden" id="note_id">
@@ -33,6 +38,9 @@
     </label>
     <label>Title
       <input id="note_title" type="text" placeholder="e.g. Wifi password, recipe, project ideas" required>
+    </label>
+    <label>Tags <span class="hint">(comma-separated, e.g. "work, ideas")</span>
+      <input id="note_tags" type="text" placeholder="e.g. work, ideas">
     </label>
     <div class="note-editor-cols">
       <label>Content (Markdown)

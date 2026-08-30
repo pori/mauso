@@ -72,6 +72,7 @@ class Note(Base):
     id = Column(Integer, primary_key=True)
     title = Column(String, nullable=False)
     content_markdown = Column(Text, default="")
+    tags = Column(String, default="")  # normalized comma-separated tags, see tools/notes.py
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 

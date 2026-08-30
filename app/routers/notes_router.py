@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..models import Note
+from ..tools import notes as notes_tool
 
 router = APIRouter()
 
@@ -11,11 +12,13 @@ router = APIRouter()
 class NoteIn(BaseModel):
     title: str
     content_markdown: str = ""
+    tags: str = ""
 
 
 def _public(n: Note) -> dict:
     return {
         "id": n.id, "title": n.title, "content_markdown": n.content_markdown,
+        "tags": notes_tool.parse_tags(n.tags),
         "created_at": n.created_at.isoformat() if n.created_at else None,
         "updated_at": n.updated_at.isoformat() if n.updated_at else None,
     }
@@ -32,7 +35,7 @@ def create_note(body: NoteIn, db: Session = Depends(get_db)):
     title = body.title.strip()
     if not title:
         raise HTTPException(400, "Title is required.")
-    note = Note(title=title, content_markdown=body.content_markdown)
+    note = Note(title=title, content_markdown=body.content_markdown, tags=notes_tool.normalize_tags(body.tags))
     db.add(note)
     db.commit()
     db.refresh(note)
@@ -49,6 +52,7 @@ def update_note(note_id: int, body: NoteIn, db: Session = Depends(get_db)):
         raise HTTPException(400, "Title is required.")
     note.title = title
     note.content_markdown = body.content_markdown
+    note.tags = notes_tool.normalize_tags(body.tags)
     db.commit()
     return _public(note)
 
