@@ -53,6 +53,8 @@ Don't edit `.env` while `docker compose up` for this project is running — Comp
 
 **Any edit under `app/` (Python, templates, or `static/*`) requires `docker compose up -d --build` to reach the running container.** The Dockerfile `COPY`s `app/` into the image at build time (`docker-compose.yml` bind-mounts only the `mauso-data` volume for the sqlite DB, not the source tree), so the deployed container is a snapshot — a CSS/JS/template/Python change on disk does nothing to the live site until it's rebuilt and redeployed.
 
+The Dockerfile's base image is `mirror.gcr.io/library/python:3.12-slim`, not a bare `python:3.12-slim` — Google's public Docker Hub pull-through mirror, same upstream image, reachable in build environments that have Docker Hub's CDN egress-blocked (the nightly-agent sandbox is one). `tests/test_dockerfile.py` fails if it's reverted to a bare Docker Hub tag. The nightly agents' safety gate no longer runs `docker compose up -d --build` at all: that sandbox's egress gateway also TLS-intercepts `pip install` *inside* the container (a stock image doesn't trust its CA), so an in-sandbox image build can't pass regardless of the change. Those routines smoke-check by booting `uvicorn app.main:app` on the sandbox host (egress works there) and curling `/healthz`; the image build itself is covered by `tests/test_dockerfile.py` plus human review of every PR before it deploys.
+
 ## Architecture
 
 ### Backend layout (`app/`)
