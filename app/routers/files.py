@@ -7,6 +7,7 @@ from .. import rag_store, settings_store
 from ..config import settings
 from ..db import get_db
 from ..models import Document
+from ..upload_validation import is_valid_pdf, looks_binary
 
 router = APIRouter()
 
@@ -16,10 +17,14 @@ TEXT_EXTENSIONS = (".txt", ".md", ".markdown", ".csv", ".json", ".log")
 def _extract_text(filename: str, content_type: str, data: bytes) -> str:
     lower = filename.lower()
     if lower.endswith(".pdf") or content_type == "application/pdf":
+        if not is_valid_pdf(data):
+            raise ValueError(f"'{filename}' doesn't look like a valid PDF (missing PDF header).")
         from pypdf import PdfReader
         reader = PdfReader(io.BytesIO(data))
         return "\n\n".join(page.extract_text() or "" for page in reader.pages)
     if lower.endswith(TEXT_EXTENSIONS) or content_type.startswith("text/"):
+        if looks_binary(data):
+            raise ValueError(f"'{filename}' looks like a binary file, not text.")
         return data.decode("utf-8", errors="replace")
     raise ValueError(f"Unsupported file type for '{filename}'. Supported: .txt, .md, .csv, .json, .log, .pdf")
 
