@@ -1,8 +1,10 @@
 import * as Crypto from "./crypto.js";
 import { renderMarkdown } from "./markdown.js";
+import { searchConversations } from "./search.js";
 
 let sessionKey = null;
 let currentConvo = null; // { id, title, messages: [{role, content, kind?}], activeDocumentIds: [], model, profileId }
+let currentSearchQuery = ""; // sidebar conversation search -- see refreshConversationList
 let availableFiles = [];
 let availableModels = []; // [{id, vision}, ...] from /api/models
 let modelVisionSupport = new Map(); // model id -> bool, derived from availableModels on each refresh
@@ -214,6 +216,10 @@ async function boot() {
     if (activeAbortController) activeAbortController.abort();
   });
   el("new-convo-btn").addEventListener("click", () => { newConversation(); window.mausoSetSidebarOpen(false); });
+  el("convo-search-input").addEventListener("input", () => {
+    currentSearchQuery = el("convo-search-input").value;
+    refreshConversationList();
+  });
   el("attach-input").addEventListener("change", onAttachChange);
   el("message-input").addEventListener("paste", onComposerPaste);
   el("message-input").addEventListener("input", onComposerInput);
@@ -348,13 +354,37 @@ async function refreshFiles() {
   }
 }
 
+// The search box above the list filters against decrypted conversation
+// content entirely client-side (see search.js) -- decrypt every record once
+// up front (same Crypto.loadConversation() call this function always made,
+// per row, to show titles) so both the title-display and the search-match
+// passes below reuse it rather than decrypting twice.
 async function refreshConversationList() {
   const records = await Crypto.listConversationRecords();
+  const decrypted = await Promise.all(
+    records.map(async (r) => ({ record: r, data: await Crypto.loadConversation(sessionKey, r.id).catch(() => null) })),
+  );
+
+  const query = currentSearchQuery.trim();
+  let snippetById = null;
+  let visible = decrypted;
+  if (query) {
+    const results = searchConversations(
+      decrypted.filter((d) => d.data).map((d) => ({ id: d.record.id, title: d.data.title, messages: d.data.messages })),
+      query,
+    );
+    snippetById = new Map(results.map((res) => [res.id, res.snippet]));
+    visible = decrypted.filter((d) => snippetById.has(d.record.id));
+  }
+
   const list = el("convo-list");
   list.innerHTML = "";
-  for (const r of records) {
-    const data = await Crypto.loadConversation(sessionKey, r.id).catch(() => null);
+  if (query && visible.length === 0) {
+    list.innerHTML = '<p class="hint">No matching conversations.</p>';
+    return;
+  }
 
+  for (const { record: r, data } of visible) {
     const row = document.createElement("div");
     row.className = "convo-item-row";
 
@@ -388,6 +418,13 @@ async function refreshConversationList() {
     }
 
     list.appendChild(row);
+
+    if (snippetById && snippetById.has(r.id)) {
+      const snippet = document.createElement("div");
+      snippet.className = "convo-search-snippet";
+      snippet.textContent = snippetById.get(r.id);
+      list.appendChild(snippet);
+    }
   }
 }
 
