@@ -21,6 +21,7 @@ from ..chat_images import read_chat_image_bytes, store_chat_image
 from ..config import settings
 from ..db import get_db
 from ..models import ChatImage
+from ..upload_validation import sniff_image_type
 
 router = APIRouter()
 
@@ -77,7 +78,10 @@ async def _fetch_image_bytes(url: str) -> tuple[bytes, str]:
                         data.extend(chunk)
                         if len(data) > settings.max_upload_bytes:
                             raise HTTPException(400, f"Image exceeds the {settings.max_upload_bytes // (1024 * 1024)}MB limit.")
-                    return bytes(data), content_type
+                    sniffed = sniff_image_type(bytes(data))
+                    if sniffed is None:
+                        raise HTTPException(400, "That URL's response claimed to be an image but its content doesn't match a supported image format (PNG, JPEG, GIF, WEBP).")
+                    return bytes(data), sniffed
         except httpx.RequestError as e:
             raise HTTPException(400, f"Could not fetch that URL: {e}")
     raise HTTPException(400, "Too many redirects.")
@@ -90,7 +94,10 @@ async def upload_chat_image(file: UploadFile, db: Session = Depends(get_db)):
     data = await file.read()
     if len(data) > settings.max_upload_bytes:
         raise HTTPException(400, f"Image exceeds the {settings.max_upload_bytes // (1024 * 1024)}MB limit.")
-    record = store_chat_image(db, data, file.content_type, source="upload")
+    sniffed = sniff_image_type(data)
+    if sniffed is None:
+        raise HTTPException(400, "That file's content doesn't match a supported image format (PNG, JPEG, GIF, WEBP).")
+    record = store_chat_image(db, data, sniffed, source="upload")
     return {"id": record.id, "url": f"/api/chat-images/{record.id}"}
 
 
