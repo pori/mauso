@@ -7,13 +7,21 @@ of a single /api/chat request, to relay onward.
 These tests don't prove the absence of a bug so much as make a future
 regression loud: if someone adds a table to persist chat turns, or a code
 path that writes message content to disk, one of these should fail."""
+import base64
+import json
+
 from sqlalchemy import select
 
 from app.db import Base, SessionLocal, engine
 from app import agent, llm_client
 from app.models import AppSetting, ChatImage, Chunk, Document, Note, Profile
+from app.tools import comfy_common
 
 ALL_MODELS = [AppSetting, Document, Chunk, Profile, Note, ChatImage]
+
+# A minimal but valid PNG signature -- upload_validation.is_valid_image only
+# looks at the magic bytes, and ComfyUI itself is mocked in the test below.
+FAKE_PNG = b"\x89PNG\r\n\x1a\n" + b"fake-rest-of-file"
 
 
 def test_no_conversation_or_message_table_exists():
@@ -73,3 +81,62 @@ def test_chat_endpoint_writes_nothing_to_disk(client, db_session, monkeypatch):
 
     after = _row_counts(db_session)
     assert after == before
+
+
+async def _fake_upload_source_image(filename, content_type, data):
+    return "uploaded.png"
+
+
+async def _fake_submit_and_wait(graph, timeout_polls=None):
+    return b"fake-edited-output"
+
+
+def test_edit_image_with_attached_source_does_not_persist_the_source_image(client, db_session, monkeypatch):
+    """A source image the browser attaches directly to the request (rather
+    than one already stored server-side via a prior /api/chat-images upload)
+    must never itself become a ChatImage row -- only the edited *output*
+    does, exactly as generate_image already does today. This is the concrete
+    slice of "no persistent server-side copy" this stage of #11 delivers:
+    the ChatImage table grows by exactly one row (the result), never two."""
+    calls = {"n": 0}
+
+    async def _fake_chat_completion(base_url, api_key, model, messages, tools=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "function": {
+                        "name": "edit_image",
+                        "arguments": json.dumps({"source_image_id": "att-1", "prompt": "make it blue"}),
+                    },
+                }],
+            }
+        return {"role": "assistant", "content": "done"}
+
+    monkeypatch.setattr(llm_client, "chat_completion", _fake_chat_completion)
+    monkeypatch.setattr(llm_client, "chat_completion_stream", _fake_chat_completion_stream)
+    monkeypatch.setattr(comfy_common, "upload_source_image", _fake_upload_source_image)
+    monkeypatch.setattr(comfy_common, "submit_and_wait", _fake_submit_and_wait)
+
+    before = _row_counts(db_session)
+
+    resp = client.post(
+        "/api/chat",
+        json={
+            "messages": [{"role": "user", "content": "edit that image to be blue"}],
+            "enabled_tools": ["edit_image"],
+            "attached_images": [{
+                "id": "att-1",
+                "data_b64": base64.b64encode(FAKE_PNG).decode(),
+                "content_type": "image/png",
+            }],
+        },
+    )
+    assert resp.status_code == 200
+
+    after = _row_counts(db_session)
+    assert after["chat_image"] == before["chat_image"] + 1
+    for model in ("app_setting", "document", "chunk", "profile", "note"):
+        assert after[model] == before[model]

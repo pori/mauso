@@ -21,6 +21,18 @@ class ChatMessage(BaseModel):
     content: Union[str, list]
 
 
+class AttachedImage(BaseModel):
+    """A client-held image the browser attaches directly to this request
+    for edit_image to operate on, instead of it having been uploaded to
+    /api/chat-images (and persisted server-side) first. Part of the
+    request-scoped "client-attached material" pattern -- these bytes never
+    touch disk here, only this request's memory, for the duration of this
+    single turn, same boundary as the message text itself."""
+    id: str
+    data_b64: str
+    content_type: str = "image/png"
+
+
 class ChatRequest(BaseModel):
     messages: list[ChatMessage]
     active_document_ids: list[int] = []
@@ -29,6 +41,7 @@ class ChatRequest(BaseModel):
     ]
     model: str = ""  # blank = use the Settings-page default
     profile_id: int | None = None
+    attached_images: list[AttachedImage] = []
 
 
 @router.post("/api/chat")
@@ -43,6 +56,7 @@ async def chat(body: ChatRequest, db: Session = Depends(get_db)):
         async for event in agent.run_agent_turn(
             db, messages, set(body.enabled_tools), body.active_document_ids,
             model_override=body.model, profile_id=body.profile_id,
+            attached_images=[a.model_dump() for a in body.attached_images],
         ):
             yield f"data: {json.dumps(event)}\n\n"
 

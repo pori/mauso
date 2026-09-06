@@ -11,6 +11,7 @@ model; steps/cfg are fixed at the values the distilled model expects.
 Same model-filename notes as image_gen.py apply (CLIP/VAE fixed, UNET
 overridable via the Settings page).
 """
+import base64
 import uuid
 
 from sqlalchemy.orm import Session
@@ -18,6 +19,7 @@ from sqlalchemy.orm import Session
 from . import comfy_common
 from ..chat_images import read_chat_image_bytes, store_chat_image
 from ..models import ChatImage
+from ..upload_validation import is_valid_image
 from .image_gen import CLIP_NAME, DEFAULT_UNET, VAE_NAME
 
 
@@ -57,7 +59,34 @@ def _build_graph(unet_name: str, loaded_filename: str, prompt: str) -> dict:
     }
 
 
-async def run(args: dict, db: Session, comfyui_checkpoint: str) -> dict:
+def _resolve_source(source_image_id, attached_images: dict, db: Session):
+    """Resolves the image to edit from either the request's attached-images
+    bag (a client-held image that was never uploaded/persisted server-side)
+    or, falling back unchanged, the existing ChatImage table. Returns
+    (source_bytes, content_type, source_ref, error) -- error is a ready-to-
+    return {"error": ...} dict, or None on success."""
+    attached = (attached_images or {}).get(str(source_image_id))
+    if attached is not None:
+        try:
+            source_bytes = base64.b64decode(attached["data_b64"], validate=True)
+        except (KeyError, ValueError, TypeError):
+            return None, None, None, {"error": f"Attached image {source_image_id!r} has invalid data."}
+        if not is_valid_image(source_bytes):
+            return None, None, None, {"error": f"Attached image {source_image_id!r} doesn't look like a supported image format."}
+        content_type = attached.get("content_type") or "image/png"
+        return source_bytes, content_type, str(source_image_id), None
+
+    try:
+        source_id = int(source_image_id)
+    except (TypeError, ValueError):
+        return None, None, None, {"error": f"source_image_id must be a number, got: {source_image_id!r}"}
+    source = db.get(ChatImage, source_id)
+    if not source:
+        return None, None, None, {"error": f"No image with id {source_id} found in this conversation."}
+    return read_chat_image_bytes(source), source.content_type, source.id, None
+
+
+async def run(args: dict, db: Session, comfyui_checkpoint: str, attached_images: dict = None) -> dict:
     source_image_id = args.get("source_image_id")
     prompt = (args.get("prompt") or "").strip()
 
@@ -66,19 +95,14 @@ async def run(args: dict, db: Session, comfyui_checkpoint: str) -> dict:
     if not prompt:
         return {"error": "No edit instruction given."}
 
-    try:
-        source_id = int(source_image_id)
-    except (TypeError, ValueError):
-        return {"error": f"source_image_id must be a number, got: {source_image_id!r}"}
-
-    source = db.get(ChatImage, source_id)
-    if not source:
-        return {"error": f"No image with id {source_id} found in this conversation."}
+    source_bytes, content_type, source_ref, error = _resolve_source(source_image_id, attached_images or {}, db)
+    if error:
+        return error
 
     unet_name = comfyui_checkpoint.strip() if comfyui_checkpoint else DEFAULT_UNET
     try:
         uploaded_filename = await comfy_common.upload_source_image(
-            f"mauso_source_{source.id}.png", source.content_type, read_chat_image_bytes(source),
+            f"mauso_source_{source_ref}.png", content_type, source_bytes,
         )
         graph = _build_graph(unet_name, uploaded_filename, prompt)
         image_bytes = await comfy_common.submit_and_wait(graph)
@@ -88,5 +112,5 @@ async def run(args: dict, db: Session, comfyui_checkpoint: str) -> dict:
     record = store_chat_image(db, image_bytes, "image/png", prompt=prompt, source="edited")
     return {
         "image_id": record.id, "image_url": f"/api/chat-images/{record.id}",
-        "prompt": prompt, "source_image_id": source.id,
+        "prompt": prompt, "source_image_id": source_ref,
     }

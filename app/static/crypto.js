@@ -20,7 +20,7 @@
 // weakening of the passphrase-never-leaves-the-browser guarantee.
 
 const DB_NAME = "mauso";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const SESSION_KEY_STORAGE = "mauso_session_key_bits";
 
 // PBKDF2-HMAC-SHA256 iteration count. 600,000 matches OWASP's current
@@ -53,6 +53,13 @@ function openDB() {
       }
       if (!db.objectStoreNames.contains("conversations")) {
         db.createObjectStore("conversations", { keyPath: "id" });
+      }
+      // Added in DB_VERSION 2 -- browser-only image storage (see
+      // storeImage/loadImage below). Guarded the same way as the two
+      // stores above so opening an existing (version-1) database only
+      // adds this store, leaving "meta"/"conversations" untouched.
+      if (!db.objectStoreNames.contains("images")) {
+        db.createObjectStore("images", { keyPath: "id" });
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -213,4 +220,72 @@ export async function verifyPassphrase(key) {
 
 export function newConversationId() {
   return crypto.randomUUID();
+}
+
+// --- Per-purpose subkeys (shared primitive for #11/#12/#13's client-side
+// storage moves) ---------------------------------------------------------
+//
+// Deriving a distinct AES-GCM subkey per purpose (images here, notes/docs
+// elsewhere) via HKDF -- rather than reusing the conversation key directly
+// -- means a leak of one purpose's key can't be used to decrypt another's.
+// The input key material is the same raw bits already cached in
+// sessionStorage for the conversation key (see cacheKeyForSession); this
+// isn't a new exposure, just a second, independent import of those bits.
+
+// Raw bits of the session-cached master key, or null if nothing is cached
+// (i.e. the passphrase hasn't been entered this tab session yet).
+export function getSessionKeyRawBits() {
+  const cached = sessionStorage.getItem(SESSION_KEY_STORAGE);
+  return cached ? b64ToBuf(cached) : null;
+}
+
+export async function deriveSubkey(rawKeyBits, infoLabel) {
+  const ikm = await crypto.subtle.importKey("raw", rawKeyBits, "HKDF", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey(
+    { name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: new TextEncoder().encode(infoLabel) },
+    ikm,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"],
+  );
+}
+
+// --- Browser-only image storage ("images" store) ------------------------
+//
+// Bytes in, bytes out -- callers own converting to/from whatever they
+// actually have (File/Blob/data URL/etc). `imageKey` is a subkey from
+// deriveSubkey(rawBits, "mauso-image-key"); nothing here manages caching
+// that key itself, same as saveConversation doesn't manage the
+// conversation key's lifecycle.
+
+export async function storeImage(imageKey, id, bytes, contentType) {
+  const db = await openDB();
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, imageKey, bytes);
+  const record = { id, contentType, iv: bufToB64(iv), ciphertext: bufToB64(ciphertext), createdAt: Date.now() };
+  await reqToPromise(tx(db, "images", "readwrite").put(record));
+  return record;
+}
+
+// Returns {bytes: Uint8Array, contentType} or null if no image has that id.
+// Throws if imageKey is wrong (AES-GCM's auth tag check fails), same as
+// loadConversation.
+export async function loadImage(imageKey, id) {
+  const db = await openDB();
+  const record = await reqToPromise(tx(db, "images", "readonly").get(id));
+  if (!record) return null;
+  const iv = new Uint8Array(b64ToBuf(record.iv));
+  const plainBuf = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, imageKey, b64ToBuf(record.ciphertext));
+  return { bytes: new Uint8Array(plainBuf), contentType: record.contentType };
+}
+
+export async function deleteImage(id) {
+  const db = await openDB();
+  await reqToPromise(tx(db, "images", "readwrite").delete(id));
+}
+
+export async function listImageIds() {
+  const db = await openDB();
+  const records = await reqToPromise(tx(db, "images", "readonly").getAll());
+  return records.map((r) => r.id);
 }
