@@ -20,7 +20,7 @@
 // weakening of the passphrase-never-leaves-the-browser guarantee.
 
 const DB_NAME = "mauso";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const SESSION_KEY_STORAGE = "mauso_session_key_bits";
 
 // PBKDF2-HMAC-SHA256 iteration count. 600,000 matches OWASP's current
@@ -60,6 +60,14 @@ function openDB() {
       // adds this store, leaving "meta"/"conversations" untouched.
       if (!db.objectStoreNames.contains("images")) {
         db.createObjectStore("images", { keyPath: "id" });
+      }
+      // Added in DB_VERSION 3 -- browser-only notes storage (see
+      // storeNote/loadNote below), the first storage primitive for #12.
+      // Not yet read from by the Notes page or attached to /api/chat
+      // requests -- that's a later stage, same as the "images" store above
+      // predates app.js actually using it.
+      if (!db.objectStoreNames.contains("notes")) {
+        db.createObjectStore("notes", { keyPath: "id" });
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -288,4 +296,46 @@ export async function listImageIds() {
   const db = await openDB();
   const records = await reqToPromise(tx(db, "images", "readonly").getAll());
   return records.map((r) => r.id);
+}
+
+// --- Browser-only notes storage ("notes" store) --------------------------
+//
+// Structured JSON in/out (unlike storeImage's raw bytes) -- mirrors
+// saveConversation/loadConversation's shape. `notesKey` is a subkey from
+// deriveSubkey(rawBits, "mauso-notes-key"); nothing here manages caching
+// that key itself, same as storeImage doesn't manage imageKey's lifecycle.
+// `note` is a plain object, e.g. {id, title, content_markdown, tags,
+// created_at, updated_at} -- this module doesn't care about its shape
+// beyond requiring an `id` field to key the record.
+
+export async function storeNote(notesKey, note) {
+  const db = await openDB();
+  const { iv, ciphertext } = await encryptJSON(notesKey, note);
+  const record = { id: note.id, updatedAt: Date.now(), iv, ciphertext };
+  await reqToPromise(tx(db, "notes", "readwrite").put(record));
+  return record;
+}
+
+// Returns the decrypted note object, or null if no note has that id.
+// Throws if notesKey is wrong (AES-GCM's auth tag check fails), same as
+// loadImage.
+export async function loadNote(notesKey, id) {
+  const db = await openDB();
+  const record = await reqToPromise(tx(db, "notes", "readonly").get(id));
+  if (!record) return null;
+  return decryptJSON(notesKey, record.iv, record.ciphertext);
+}
+
+export async function deleteNote(id) {
+  const db = await openDB();
+  await reqToPromise(tx(db, "notes", "readwrite").delete(id));
+}
+
+// Decrypts and returns every stored note, most recently updated first
+// (by this store's own updatedAt, not the plaintext note's own timestamp).
+export async function listNoteRecords(notesKey) {
+  const db = await openDB();
+  const records = await reqToPromise(tx(db, "notes", "readonly").getAll());
+  records.sort((a, b) => b.updatedAt - a.updatedAt);
+  return Promise.all(records.map((r) => decryptJSON(notesKey, r.iv, r.ciphertext)));
 }

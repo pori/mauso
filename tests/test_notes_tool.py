@@ -70,3 +70,57 @@ def test_search_without_tag_returns_all_matching_query(db_session):
 
     result = notes.search({}, db_session)
     assert {r["title"] for r in result["results"]} == {"Standup notes", "Recipe"}
+
+
+def _attached(id_, title, content="", tags=None):
+    return {"id": id_, "title": title, "content_markdown": content, "tags": tags or []}
+
+
+def test_search_with_attached_notes_ignores_the_db(db_session):
+    """When the client attaches a notes corpus, that's what gets searched --
+    any rows in the (still server-side, for now) Note table must be ignored
+    entirely, not merged in. This is the crux of #12: the DB becomes purely
+    a fallback for clients that don't attach anything yet."""
+    _make_note(db_session, "DB-only note", content="should never surface")
+    attached = [_attached("n1", "Attached note", content="from the browser")]
+
+    result = notes.search({}, db_session, attached_notes=attached)
+
+    assert [r["title"] for r in result["results"]] == ["Attached note"]
+
+
+def test_search_attached_notes_matches_query_and_tag(db_session):
+    attached = [
+        _attached("n1", "Standup notes", content="daily sync", tags=["work"]),
+        _attached("n2", "Grocery list", content="milk, eggs", tags=["home"]),
+    ]
+
+    result = notes.search({"query": "sync", "tag": "work"}, db_session, attached_notes=attached)
+
+    assert [r["title"] for r in result["results"]] == ["Standup notes"]
+    assert result["results"][0]["id"] == "n1"
+
+
+def test_search_attached_notes_tag_matching_is_case_insensitive(db_session):
+    attached = [_attached("n1", "Standup notes", tags=["Work"])]
+
+    result = notes.search({"tag": "WORK"}, db_session, attached_notes=attached)
+
+    assert [r["title"] for r in result["results"]] == ["Standup notes"]
+
+
+def test_search_attached_notes_with_no_matches_is_graceful(db_session):
+    attached = [_attached("n1", "Recipe", tags=["cooking"])]
+
+    result = notes.search({"tag": "nonexistent"}, db_session, attached_notes=attached)
+
+    assert result["results"] == []
+    assert "note" in result
+
+
+def test_search_falls_back_to_db_when_attached_notes_is_empty(db_session):
+    _make_note(db_session, "DB note", tags="work")
+
+    result = notes.search({}, db_session, attached_notes=[])
+
+    assert [r["title"] for r in result["results"]] == ["DB note"]
