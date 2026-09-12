@@ -12,6 +12,15 @@ plaintext on this backend, same tradeoff as uploaded RAG documents. Plain
 substring matching, not embeddings: notebooks here are small and don't
 warrant the embedding-model dependency search_documents has.
 
+`search` also accepts an optional `attached_notes` corpus -- the client's
+own copy of its notes, attached directly to a single /api/chat request the
+same way `edit_image` accepts `attached_images` (see routers/chat.py,
+tools/image_edit.py). When present, matching runs against that list
+instead of querying the Note table, and nothing here touches the DB. This
+is the first slice of #12 (moving saved notes to client-side-only storage)
+-- until the rest of that migration lands, callers that don't attach a
+corpus keep getting the existing DB-backed behavior unchanged.
+
 See tools/registry.py for both schemas."""
 
 from sqlalchemy.orm import Session
@@ -43,19 +52,30 @@ def parse_tags(raw: str) -> list:
     return [t for t in (raw or "").split(",") if t]
 
 
-def search(args: dict, db: Session) -> dict:
+def search(args: dict, db: Session, attached_notes: list = None) -> dict:
     query = (args.get("query") or "").strip().lower()
     tag = (args.get("tag") or "").strip().lower()
-    notes = db.query(Note).order_by(Note.updated_at.desc()).all()
-    if query:
-        notes = [n for n in notes if query in n.title.lower() or query in n.content_markdown.lower()]
-    if tag:
-        notes = [n for n in notes if tag in parse_tags(n.tags)]
-    if not notes:
-        return {"results": [], "note": "No saved notes matched (or none exist yet -- see the Notes page)."}
-    return {
-        "results": [
+
+    if attached_notes:
+        candidates = [
+            {
+                "id": n.get("id"),
+                "title": n.get("title") or "",
+                "content_markdown": n.get("content_markdown") or "",
+                "tags": [t.strip().lower() for t in (n.get("tags") or []) if t.strip()],
+            }
+            for n in attached_notes
+        ]
+    else:
+        candidates = [
             {"id": n.id, "title": n.title, "content_markdown": n.content_markdown, "tags": parse_tags(n.tags)}
-            for n in notes[:MAX_RESULTS]
-        ],
-    }
+            for n in db.query(Note).order_by(Note.updated_at.desc()).all()
+        ]
+
+    if query:
+        candidates = [n for n in candidates if query in n["title"].lower() or query in n["content_markdown"].lower()]
+    if tag:
+        candidates = [n for n in candidates if tag in n["tags"]]
+    if not candidates:
+        return {"results": [], "note": "No saved notes matched (or none exist yet -- see the Notes page)."}
+    return {"results": candidates[:MAX_RESULTS]}

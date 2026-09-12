@@ -64,6 +64,7 @@ def _build_system_prompt(tool_schemas: list, profile_prompt: str = "") -> str:
 async def _execute_tool(
     name: str, args: dict, db: Session, active_document_ids: list, base_url: str, api_key: str,
     embedding_model: str, comfyui_checkpoint: str, tavily_api_key: str, attached_images: dict,
+    attached_notes: list,
 ) -> dict:
     if name == "generate_image":
         return await image_gen.run(args, db, comfyui_checkpoint)
@@ -72,7 +73,7 @@ async def _execute_tool(
     if name == "create_note":
         return notes.run(args)
     if name == "search_notes":
-        return notes.search(args, db)
+        return notes.search(args, db, attached_notes)
     if name == "search_documents":
         return await rag.run(args, db, active_document_ids, base_url, api_key, embedding_model)
     if name == "web_search":
@@ -82,7 +83,7 @@ async def _execute_tool(
 
 async def run_agent_turn(
     db: Session, messages: list, enabled_tools: set, active_document_ids: list, model_override: str = "",
-    profile_id: int = None, attached_images: list = None,
+    profile_id: int = None, attached_images: list = None, attached_notes: list = None,
 ) -> AsyncIterator[dict]:
     attached_images_by_id = {str(a["id"]): a for a in (attached_images or [])}
     base_url = settings_store.get_base_url(db)
@@ -119,7 +120,7 @@ async def run_agent_turn(
                 yield {"type": "tool_call", "name": name, "args": args}
                 result = await _execute_tool(
                     name, args, db, active_document_ids, base_url, api_key, embedding_model, comfyui_checkpoint,
-                    tavily_api_key, attached_images_by_id,
+                    tavily_api_key, attached_images_by_id, attached_notes,
                 )
                 yield {"type": "tool_result", "name": name, "result": result}
                 working_messages.append({

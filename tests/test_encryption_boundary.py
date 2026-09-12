@@ -140,3 +140,41 @@ def test_edit_image_with_attached_source_does_not_persist_the_source_image(clien
     assert after["chat_image"] == before["chat_image"] + 1
     for model in ("app_setting", "document", "chunk", "profile", "note"):
         assert after[model] == before[model]
+
+
+def test_search_notes_with_attached_corpus_does_not_touch_the_note_table(client, db_session, monkeypatch):
+    """The #12 stage-1 slice: a client that attaches its own notes corpus to
+    the request must get results from that corpus, and the Note table --
+    however many rows already exist in it -- must be left completely
+    untouched, not read from and not written to."""
+    async def _fake_chat_completion(base_url, api_key, model, messages, tools=None):
+        if not any(m.get("role") == "tool" for m in messages):
+            return {
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "function": {"name": "search_notes", "arguments": json.dumps({"query": "sync"})},
+                }],
+            }
+        return {"role": "assistant", "content": "done"}
+
+    monkeypatch.setattr(llm_client, "chat_completion", _fake_chat_completion)
+    monkeypatch.setattr(llm_client, "chat_completion_stream", _fake_chat_completion_stream)
+
+    before = _row_counts(db_session)
+
+    resp = client.post(
+        "/api/chat",
+        json={
+            "messages": [{"role": "user", "content": "search my notes for sync"}],
+            "enabled_tools": ["search_notes"],
+            "attached_notes": [
+                {"id": "n1", "title": "Standup notes", "content_markdown": "daily sync", "tags": ["work"]},
+            ],
+        },
+    )
+    assert resp.status_code == 200
+    assert "Standup notes" in resp.text
+
+    after = _row_counts(db_session)
+    assert after == before

@@ -33,6 +33,18 @@ class AttachedImage(BaseModel):
     content_type: str = "image/png"
 
 
+class AttachedNote(BaseModel):
+    """A client-held saved note the browser attaches directly to this
+    request for search_notes to search, instead of the tool querying the
+    (still server-side, for now -- see #12) Note table. Same
+    "client-attached material" pattern as AttachedImage above -- never
+    persisted, only this request's memory for the duration of this turn."""
+    id: str
+    title: str
+    content_markdown: str
+    tags: list[str] = []
+
+
 class ChatRequest(BaseModel):
     messages: list[ChatMessage]
     active_document_ids: list[int] = []
@@ -42,6 +54,7 @@ class ChatRequest(BaseModel):
     model: str = ""  # blank = use the Settings-page default
     profile_id: int | None = None
     attached_images: list[AttachedImage] = []
+    attached_notes: list[AttachedNote] = []
 
 
 @router.post("/api/chat")
@@ -57,6 +70,7 @@ async def chat(body: ChatRequest, db: Session = Depends(get_db)):
             db, messages, set(body.enabled_tools), body.active_document_ids,
             model_override=body.model, profile_id=body.profile_id,
             attached_images=[a.model_dump() for a in body.attached_images],
+            attached_notes=[n.model_dump() for n in body.attached_notes],
         ):
             yield f"data: {json.dumps(event)}\n\n"
 
