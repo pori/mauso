@@ -13,7 +13,7 @@ import json
 from sqlalchemy import select
 
 from app.db import Base, SessionLocal, engine
-from app import agent, llm_client
+from app import agent, llm_client, settings_store
 from app.models import AppSetting, ChatImage, Chunk, Document, Note, Profile
 from app.tools import comfy_common
 
@@ -175,6 +175,52 @@ def test_search_notes_with_attached_corpus_does_not_touch_the_note_table(client,
     )
     assert resp.status_code == 200
     assert "Standup notes" in resp.text
+
+    after = _row_counts(db_session)
+    assert after == before
+
+
+async def _fake_embed(base_url, api_key, embedding_model, texts):
+    return [[1.0, 0.0] for _ in texts]
+
+
+def test_search_documents_with_attached_chunks_does_not_touch_document_or_chunk_tables(client, db_session, monkeypatch):
+    """The #13 stage-1 slice: a client that attaches its own doc-chunk corpus
+    to the request must get results ranked from that corpus, and the
+    Document/Chunk tables -- however many rows already exist in them --
+    must be left completely untouched, not read from and not written to."""
+    settings_store.save(db_session, "http://fake-llm", "", "fake-model", "fake-embed-model", "")
+
+    async def _fake_chat_completion(base_url, api_key, model, messages, tools=None):
+        if not any(m.get("role") == "tool" for m in messages):
+            return {
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "function": {"name": "search_documents", "arguments": json.dumps({"query": "budget"})},
+                }],
+            }
+        return {"role": "assistant", "content": "done"}
+
+    monkeypatch.setattr(llm_client, "chat_completion", _fake_chat_completion)
+    monkeypatch.setattr(llm_client, "chat_completion_stream", _fake_chat_completion_stream)
+    monkeypatch.setattr(llm_client, "embed", _fake_embed)
+
+    before = _row_counts(db_session)
+
+    resp = client.post(
+        "/api/chat",
+        json={
+            "messages": [{"role": "user", "content": "search my documents for the budget"}],
+            "enabled_tools": ["search_documents"],
+            "attached_doc_chunks": [{
+                "document_id": "d1", "filename": "Q3 plan.md", "chunk_index": 0,
+                "text": "the budget is 10k", "vector": [1.0, 0.0],
+            }],
+        },
+    )
+    assert resp.status_code == 200
+    assert "Q3 plan.md" in resp.text
 
     after = _row_counts(db_session)
     assert after == before

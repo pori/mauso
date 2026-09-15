@@ -61,11 +61,34 @@ def _cosine(a: list, b: list) -> float:
 
 async def search(
     db: Session, query: str, base_url: str, api_key: str, embedding_model: str,
-    document_ids: Optional[list] = None, top_k: int = 5,
+    document_ids: Optional[list] = None, top_k: int = 5, attached_chunks: Optional[list] = None,
 ) -> list:
-    """Returns a list of {filename, chunk_index, text, score}, best first."""
+    """Returns a list of {filename, chunk_index, text, score}, best first.
+
+    When `attached_chunks` is given (the client's own copy of its active
+    documents' chunks, e.g. [{document_id, filename, chunk_index, text,
+    vector}] -- see #13), ranking runs against that list instead of
+    querying the Chunk table, and the DB is never touched for candidates.
+    The query embedding is still computed server-side either way -- query
+    text transiting the backend is the same boundary already accepted for
+    any message content."""
     vectors = await llm_client.embed(base_url, api_key, embedding_model, [query])
     query_vector = vectors[0]
+
+    if attached_chunks:
+        scored = [
+            (
+                _cosine(query_vector, c.get("vector") or []),
+                {
+                    "filename": c.get("filename") or "",
+                    "chunk_index": c.get("chunk_index"),
+                    "text": c.get("text") or "",
+                },
+            )
+            for c in attached_chunks
+        ]
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        return [dict(item, score=round(score, 4)) for score, item in scored[:top_k]]
 
     q = db.query(Chunk)
     if document_ids:
