@@ -45,6 +45,20 @@ class AttachedNote(BaseModel):
     tags: list[str] = []
 
 
+class AttachedDocChunk(BaseModel):
+    """A client-held RAG chunk (with its embedding) the browser attaches
+    directly to this request for search_documents to rank, instead of the
+    tool querying the (still server-side, for now -- see #13) Chunk table.
+    Same "client-attached material" pattern as AttachedImage/AttachedNote
+    above -- never persisted, only this request's memory for the duration
+    of this turn."""
+    document_id: str
+    filename: str
+    chunk_index: int
+    text: str
+    vector: list[float]
+
+
 class ChatRequest(BaseModel):
     messages: list[ChatMessage]
     active_document_ids: list[int] = []
@@ -55,6 +69,7 @@ class ChatRequest(BaseModel):
     profile_id: int | None = None
     attached_images: list[AttachedImage] = []
     attached_notes: list[AttachedNote] = []
+    attached_doc_chunks: list[AttachedDocChunk] = []
 
 
 @router.post("/api/chat")
@@ -71,6 +86,7 @@ async def chat(body: ChatRequest, db: Session = Depends(get_db)):
             model_override=body.model, profile_id=body.profile_id,
             attached_images=[a.model_dump() for a in body.attached_images],
             attached_notes=[n.model_dump() for n in body.attached_notes],
+            attached_doc_chunks=[c.model_dump() for c in body.attached_doc_chunks],
         ):
             yield f"data: {json.dumps(event)}\n\n"
 

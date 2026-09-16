@@ -20,7 +20,7 @@
 // weakening of the passphrase-never-leaves-the-browser guarantee.
 
 const DB_NAME = "mauso";
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 const SESSION_KEY_STORAGE = "mauso_session_key_bits";
 
 // PBKDF2-HMAC-SHA256 iteration count. 600,000 matches OWASP's current
@@ -68,6 +68,17 @@ function openDB() {
       // predates app.js actually using it.
       if (!db.objectStoreNames.contains("notes")) {
         db.createObjectStore("notes", { keyPath: "id" });
+      }
+      // Added in DB_VERSION 4 -- browser-only RAG document storage (see
+      // storeDocument/storeDocChunk below), the first storage primitive
+      // for #13. Not yet read from by the Files page, attached to
+      // /api/chat requests, or populated by an upload flow -- that's later
+      // work, same as "images"/"notes" predate their pages using them.
+      if (!db.objectStoreNames.contains("documents")) {
+        db.createObjectStore("documents", { keyPath: "id" });
+      }
+      if (!db.objectStoreNames.contains("doc_chunks")) {
+        db.createObjectStore("doc_chunks", { keyPath: "id" });
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -338,4 +349,72 @@ export async function listNoteRecords(notesKey) {
   const records = await reqToPromise(tx(db, "notes", "readonly").getAll());
   records.sort((a, b) => b.updatedAt - a.updatedAt);
   return Promise.all(records.map((r) => decryptJSON(notesKey, r.iv, r.ciphertext)));
+}
+
+// --- Browser-only RAG document storage ("documents" + "doc_chunks") ------
+//
+// Mirrors storeNote/loadNote's shape, split across two stores because a
+// document has many chunks. `docsKey` is a subkey from
+// deriveSubkey(rawBits, "mauso-docs-key"); nothing here manages caching
+// that key itself, same as storeNote doesn't manage notesKey's lifecycle.
+// `document` is a plain object, e.g. {id, filename, size_bytes, status,
+// error, created_at} -- this module doesn't care about its shape beyond
+// requiring an `id` field to key the record. `chunk` is e.g. {id,
+// document_id, chunk_index, text, vector}.
+
+export async function storeDocument(docsKey, document) {
+  const db = await openDB();
+  const { iv, ciphertext } = await encryptJSON(docsKey, document);
+  const record = { id: document.id, updatedAt: Date.now(), iv, ciphertext };
+  await reqToPromise(tx(db, "documents", "readwrite").put(record));
+  return record;
+}
+
+// Returns the decrypted document object, or null if no document has that id.
+// Throws if docsKey is wrong (AES-GCM's auth tag check fails), same as
+// loadNote.
+export async function loadDocument(docsKey, id) {
+  const db = await openDB();
+  const record = await reqToPromise(tx(db, "documents", "readonly").get(id));
+  if (!record) return null;
+  return decryptJSON(docsKey, record.iv, record.ciphertext);
+}
+
+export async function deleteDocument(id) {
+  const db = await openDB();
+  await reqToPromise(tx(db, "documents", "readwrite").delete(id));
+}
+
+// Decrypts and returns every stored document, most recently updated first.
+export async function listDocumentRecords(docsKey) {
+  const db = await openDB();
+  const records = await reqToPromise(tx(db, "documents", "readonly").getAll());
+  records.sort((a, b) => b.updatedAt - a.updatedAt);
+  return Promise.all(records.map((r) => decryptJSON(docsKey, r.iv, r.ciphertext)));
+}
+
+export async function storeDocChunk(docsKey, chunk) {
+  const db = await openDB();
+  const { iv, ciphertext } = await encryptJSON(docsKey, chunk);
+  const record = { id: chunk.id, documentId: chunk.document_id, iv, ciphertext };
+  await reqToPromise(tx(db, "doc_chunks", "readwrite").put(record));
+  return record;
+}
+
+// Decrypts and returns every chunk belonging to the given document id, in
+// no particular order (callers sort by chunk_index if needed).
+export async function listDocChunksForDocument(docsKey, documentId) {
+  const db = await openDB();
+  const all = await reqToPromise(tx(db, "doc_chunks", "readonly").getAll());
+  const matches = all.filter((r) => r.documentId === documentId);
+  return Promise.all(matches.map((r) => decryptJSON(docsKey, r.iv, r.ciphertext)));
+}
+
+export async function deleteDocChunksForDocument(documentId) {
+  const db = await openDB();
+  const all = await reqToPromise(tx(db, "doc_chunks", "readonly").getAll());
+  const store = tx(db, "doc_chunks", "readwrite");
+  await Promise.all(
+    all.filter((r) => r.documentId === documentId).map((r) => reqToPromise(store.delete(r.id))),
+  );
 }
