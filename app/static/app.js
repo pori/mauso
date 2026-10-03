@@ -200,6 +200,7 @@ window.addEventListener("popstate", () => {
 async function boot() {
   imageKey = await Crypto.deriveSubkey(Crypto.getSessionKeyRawBits(), "mauso-image-key");
   await migrateImagesIfNeeded();
+  reconcileRenderJobs(); // not awaited -- covers reload-after-navigating-away, see #10
   await refreshFiles();
   await refreshModels();
   await refreshProfiles();
@@ -296,6 +297,88 @@ async function migrateImagesIfNeeded() {
     }
   }
   await Crypto.markImagesMigrated();
+}
+
+// Resolves one pending render job against the server (#10). Returns
+// "pending" (still queued/running, or the request itself failed -- try
+// again later) or {status: "succeeded", bytes, contentType} /
+// {status: "failed", error}. Deletes the server-side job row once it's
+// been absorbed either way -- a 404 (e.g. a server restart swept it, or
+// it was never actually created) counts as "failed" with a clear reason
+// rather than leaving the placeholder stuck pending forever.
+async function pollRenderJob(jobId) {
+  let resp;
+  try {
+    resp = await fetch(`/api/render-jobs/${jobId}`);
+  } catch {
+    return "pending";
+  }
+  if (resp.status === 404) {
+    return { status: "failed", error: "This render's record is gone (the server may have restarted)." };
+  }
+  if (!resp.ok) return "pending";
+  const body = await resp.json();
+  if (body.status === "succeeded") {
+    fetch(`/api/render-jobs/${jobId}`, { method: "DELETE" }).catch(() => {});
+    return { status: "succeeded", bytes: new Uint8Array(Crypto.b64ToBuf(body.image_b64)), contentType: body.content_type || "image/png" };
+  }
+  if (body.status === "failed") {
+    fetch(`/api/render-jobs/${jobId}`, { method: "DELETE" }).catch(() => {});
+    return { status: "failed", error: body.error || "The render failed." };
+  }
+  return "pending"; // queued | running
+}
+
+// Walks every persisted conversation (not just the open one -- the user
+// may have switched away entirely) for a render still marked "pending"
+// and finds out what actually happened server-side. Run once on boot
+// (reload-after-navigating-away) and on visibilitychange -> visible;
+// re-schedules itself every ~5s while anything is still genuinely pending
+// and the page is visible, so a render that finishes while the tab is
+// back in the foreground shows up without needing another reload.
+async function reconcileRenderJobs() {
+  const records = await Crypto.listConversationRecords();
+  let anyStillPending = false;
+  for (const r of records) {
+    let convo;
+    try {
+      convo = await Crypto.loadConversation(sessionKey, r.id);
+    } catch {
+      continue;
+    }
+    const pending = (convo.messages || []).filter((m) => m.kind === "image" && m.status === "pending");
+    if (!pending.length) continue;
+    let changed = false;
+    for (const m of pending) {
+      const outcome = await pollRenderJob(m.jobId);
+      if (outcome === "pending") {
+        anyStillPending = true;
+        continue;
+      }
+      changed = true;
+      if (outcome.status === "succeeded") {
+        await Crypto.storeImage(imageKey, m.jobId, outcome.bytes, outcome.contentType);
+        // "recovered" (not a plain resolved state) -- this turn's SSE
+        // connection actually dropped before the result arrived, unlike
+        // the live tool_result path above, so renderMessage adds a note.
+        m.status = "recovered";
+        m.image_id = m.jobId;
+      } else {
+        m.status = "failed";
+        m.error = outcome.error;
+      }
+    }
+    if (changed) {
+      await Crypto.saveConversation(sessionKey, r.id, convo);
+      if (currentConvo && currentConvo.id === r.id) {
+        currentConvo = convo;
+        renderMessages();
+      }
+    }
+  }
+  if (anyStillPending && document.visibilityState === "visible") {
+    setTimeout(reconcileRenderJobs, 5000);
+  }
 }
 
 // Populates the model picker from the configured endpoint's /models list
@@ -703,6 +786,33 @@ function renderMessage(m) {
     div.appendChild(body);
   } else if (m.kind === "image") {
     div.className += " msg-image";
+    // Set whenever a render went through the resumable-job path (#10),
+    // regardless of its current status -- lets updateImageMessageByJobId
+    // find this exact node again later to patch it in place.
+    if (m.jobId) div.dataset.jobId = m.jobId;
+
+    if (m.status === "pending") {
+      div.className += " msg-image-pending";
+      const p = document.createElement("div");
+      p.className = "msg-image-caption";
+      p.textContent = `⏳ ${m.source === "edited" ? "Editing" : "Generating"} image${m.prompt ? ` (${m.prompt})` : ""}...`;
+      div.appendChild(p);
+      return div;
+    }
+    if (m.status === "failed") {
+      div.className += " msg-image-failed";
+      const p = document.createElement("div");
+      p.className = "msg-image-caption";
+      p.textContent = `⚠️ ${m.source === "edited" ? "Edit" : "Generation"} failed: ${m.error || "unknown error"}`;
+      const retryBtn = document.createElement("button");
+      retryBtn.type = "button";
+      retryBtn.className = "msg-image-retry-btn";
+      retryBtn.textContent = "Retry";
+      retryBtn.addEventListener("click", () => retryImageMessage(m));
+      div.append(p, retryBtn);
+      return div;
+    }
+
     const p = document.createElement("div");
     p.className = "msg-image-caption";
     const label = m.source === "upload" ? "Uploaded image"
@@ -711,7 +821,13 @@ function renderMessage(m) {
     const idSpan = document.createElement("span");
     idSpan.className = "hint";
     const elapsed = formatElapsed(m.elapsedMs);
-    idSpan.textContent = ` (id ${m.image_id})${elapsed ? ` · ${elapsed}` : ""}`;
+    // "recovered" means the turn that started this render got interrupted
+    // (tab backgrounded/closed) before the result came back over SSE --
+    // reconcileRenderJobs() picked it up afterward. The image itself made
+    // it; any text the model would have said about it in the same turn
+    // didn't, and isn't reconstructed -- see #10's accepted scope.
+    const recoveredNote = m.status === "recovered" ? " (response interrupted — image recovered)" : "";
+    idSpan.textContent = ` (id ${m.image_id})${elapsed ? ` · ${elapsed}` : ""}${recoveredNote}`;
     p.textContent = `🖼 ${label}`;
     p.appendChild(idSpan);
     const img = document.createElement("img");
@@ -739,6 +855,43 @@ function renderMessage(m) {
   return div;
 }
 
+// Removes a failed render's placeholder and pre-fills the composer with a
+// retry instruction for the user to review and send themselves, rather
+// than silently re-triggering a new LLM/ComfyUI call on their behalf --
+// tools are only ever invoked by the model deciding to call them, there's
+// no direct "run this tool again" path, and auto-resending without
+// confirmation would spend a turn/render the user didn't explicitly ask
+// for again.
+function retryImageMessage(m) {
+  currentConvo.messages = currentConvo.messages.filter((msg) => msg !== m);
+  renderMessages();
+  persistCurrentConvo();
+  const input = el("message-input");
+  input.value = m.source === "edited"
+    ? `Please retry editing that image: ${m.prompt}`
+    : `Please retry generating that image: ${m.prompt}`;
+  autoResizeComposerInput();
+  input.focus();
+}
+
+// Finds the still-in-currentConvo image message with this jobId (any
+// status), lets `mutate` change it in place, then patches the already-
+// rendered DOM node (found via the data-job-id set above) to match --
+// without a full renderMessages() pass. Used by the live tool_result path
+// (connection survived) where other turn content may still be streaming
+// in concurrently; reconcileRenderJobs() below updates a *different*
+// (possibly not-open) conversation's record directly instead, since it
+// has no live DOM to patch.
+function updateImageMessageByJobId(jobId, mutate) {
+  const idx = currentConvo.messages.findIndex((msg) => msg.kind === "image" && msg.jobId === jobId);
+  if (idx === -1) return null;
+  const msg = currentConvo.messages[idx];
+  mutate(msg);
+  const oldNode = el("messages").querySelector(`[data-job-id="${jobId}"]`);
+  if (oldNode) oldNode.replaceWith(renderMessage(msg));
+  return msg;
+}
+
 // ---------- Image @mentions ----------
 //
 // Every image in the conversation (uploaded, pasted from the web, or
@@ -756,7 +909,9 @@ function imageTagEntries() {
   const entries = [];
   let n = 0;
   for (const m of currentConvo.messages) {
-    if (m.kind !== "image") continue;
+    // Pending/failed renders (#10) have no bytes to resolve yet -- don't
+    // make them @-mentionable/attachable until they actually resolve.
+    if (m.kind !== "image" || m.status === "pending" || m.status === "failed") continue;
     n += 1;
     entries.push({ tag: `image${n}`, id: m.image_id, url: m.image_url });
   }
@@ -1500,9 +1655,10 @@ function setSendingState(active) {
 
 // Keeps the screen from auto-locking while a turn (LLM roundtrip or a slow
 // tool like generate_image/edit_image, which can take minutes) is in
-// flight -- there's nothing server-side to reconnect to if the connection
-// dies (see the "no server-side persistence" privacy model in CLAUDE.md),
-// so losing the tab mid-turn just loses the reply. Doesn't help with
+// flight. As of #10, an in-flight image render specifically survives the
+// connection dying (reconcileRenderJobs() picks it up on return) -- but
+// the rest of the turn (any text reply, non-image tool results) still
+// doesn't, so losing the tab mid-turn still loses those. Doesn't help with
 // switching away from the tab/app entirely -- only screen auto-lock -- and
 // silently does nothing on browsers without Wake Lock support (notably
 // desktop Firefox) rather than failing the turn over it.
@@ -1523,12 +1679,16 @@ function releaseWakeLock() {
   wakeLock = null;
 }
 
-// The spec releases the lock automatically when the tab is hidden (locking
-// the screen counts) -- re-acquire on return if a turn is still running,
-// otherwise the rest of that same turn is unprotected.
+// The spec releases the wake lock automatically when the tab is hidden
+// (locking the screen counts) -- re-acquire on return if a turn is still
+// running, otherwise the rest of that same turn is unprotected. Also the
+// other trigger (besides boot()) for reconcileRenderJobs() (#10) -- covers
+// coming back to a tab that was backgrounded during a render, without
+// needing a full reload.
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && activeAbortController && !wakeLock) {
-    requestWakeLock();
+  if (document.visibilityState === "visible") {
+    if (activeAbortController && !wakeLock) requestWakeLock();
+    reconcileRenderJobs();
   }
 });
 
@@ -1572,22 +1732,62 @@ async function handleEvent(event, assistantMsg, assistantNode, statusEl, turnTim
     if (label) label.textContent = modelLabelText(assistantMsg);
   } else if (event.type === "tool_call") {
     turnTiming.toolStartTime = performance.now();
+    turnTiming.lastToolCallArgs = event.args;
     statusEl.textContent = `Using ${event.name}...`;
+  } else if (event.type === "render_job") {
+    // Announced before the (possibly multi-minute) render starts, not
+    // buried in a tool_result that would only arrive after it finishes --
+    // see render_jobs.py / #10. Insert the placeholder AND persist right
+    // away, not at turn end like everything else here: this is the actual
+    // fix for the bug (today nothing hits IndexedDB until the whole turn
+    // finishes, so a mid-render disconnect loses it with nothing to
+    // recover from on return).
+    const assistantWrap = assistantNode.parentElement;
+    const args = turnTiming.lastToolCallArgs || {};
+    insertMessage({
+      role: "assistant", kind: "image", turnId: assistantMsg.turnId, jobId: event.job_id,
+      status: "pending", prompt: args.prompt || "", source: event.name === "edit_image" ? "edited" : "generated",
+    }, assistantWrap);
+    await persistCurrentConvo();
   } else if (event.type === "tool_result") {
     const assistantWrap = assistantNode.parentElement;
     const elapsedMs = turnTiming.toolStartTime != null ? performance.now() - turnTiming.toolStartTime : null;
     turnTiming.toolStartTime = null;
-    if ((event.name === "generate_image" || event.name === "edit_image") && event.result.image_b64) {
-      // Store the bytes locally before inserting the message -- renderMessage's
-      // resolution for this message id then finds them immediately, no
-      // round trip to anywhere.
-      const bytes = new Uint8Array(Crypto.b64ToBuf(event.result.image_b64));
-      await Crypto.storeImage(imageKey, event.result.image_id, bytes, event.result.content_type || "image/png");
-      insertMessage({
-        role: "assistant", kind: "image", turnId: assistantMsg.turnId, elapsedMs,
-        image_id: event.result.image_id,
-        prompt: event.result.prompt, source: event.name === "edit_image" ? "edited" : "generated",
-      }, assistantWrap);
+    if (event.name === "generate_image" || event.name === "edit_image") {
+      const jobId = event.result.job_id;
+      if (event.result.image_b64) {
+        // Store the bytes locally before resolving the placeholder --
+        // renderMessage's resolution for this message id then finds them
+        // immediately, no round trip to anywhere.
+        const bytes = new Uint8Array(Crypto.b64ToBuf(event.result.image_b64));
+        await Crypto.storeImage(imageKey, event.result.image_id, bytes, event.result.content_type || "image/png");
+        const resolved = jobId && updateImageMessageByJobId(jobId, (msg) => {
+          delete msg.status;
+          delete msg.error;
+          msg.image_id = event.result.image_id;
+          msg.elapsedMs = elapsedMs;
+          msg.prompt = event.result.prompt;
+        });
+        if (!resolved) {
+          // No matching pending placeholder -- shouldn't normally happen,
+          // since the render_job event always precedes this one for these
+          // tools, but fall back to inserting fresh rather than dropping
+          // the result.
+          insertMessage({
+            role: "assistant", kind: "image", turnId: assistantMsg.turnId, elapsedMs, jobId,
+            image_id: event.result.image_id, prompt: event.result.prompt,
+            source: event.name === "edit_image" ? "edited" : "generated",
+          }, assistantWrap);
+        }
+        // The client has the bytes now via the normal path -- the job row
+        // is redundant, clean it up rather than leaving it to the TTL sweep.
+        if (jobId) fetch(`/api/render-jobs/${jobId}`, { method: "DELETE" }).catch(() => {});
+      } else if (event.result.error) {
+        const resolved = jobId && updateImageMessageByJobId(jobId, (msg) => { msg.status = "failed"; msg.error = event.result.error; });
+        if (!resolved) statusEl.textContent = `${event.name} error: ${event.result.error}`;
+        if (jobId) fetch(`/api/render-jobs/${jobId}`, { method: "DELETE" }).catch(() => {});
+      }
+      await persistCurrentConvo();
     } else if (event.name === "create_note") {
       insertMessage({ role: "assistant", kind: "note", turnId: assistantMsg.turnId, title: event.result.title, content: event.result.content_markdown }, assistantWrap);
     } else if (event.result && event.result.error) {

@@ -33,6 +33,12 @@ class Settings:
 
     max_agent_tool_iterations: int = int(os.environ.get("MAX_AGENT_TOOL_ITERATIONS", "5"))
 
+    # How long a finished (succeeded/failed) RenderJob row is kept if
+    # nothing ever picks it up (client never reconnected) -- see
+    # render_jobs.py. Swept opportunistically on each new job, not by a
+    # standing background loop.
+    render_job_ttl_hours: int = int(os.environ.get("RENDER_JOB_TTL_HOURS", "24"))
+
 
 settings = Settings()
 settings.data_dir.mkdir(parents=True, exist_ok=True)

@@ -15,6 +15,7 @@ import base64
 import uuid
 
 from . import comfy_common
+from .. import render_jobs
 
 DEFAULT_UNET = "flux-2-klein-9b-fp8.safetensors"
 CLIP_NAME = "qwen_3_8b_fp8mixed.safetensors"
@@ -54,26 +55,32 @@ def _build_graph(unet_name: str, prompt: str, negative_prompt: str) -> dict:
     }
 
 
-async def run(args: dict, comfyui_checkpoint: str) -> dict:
+async def run(args: dict, comfyui_checkpoint: str, job_id: str) -> dict:
     prompt = (args.get("prompt") or "").strip()
     negative_prompt = (args.get("negative_prompt") or "").strip()
     if not prompt:
+        render_jobs.mark_failed(job_id, "No prompt given.")
         return {"error": "No prompt given."}
 
     unet_name = comfyui_checkpoint.strip() if comfyui_checkpoint else DEFAULT_UNET
     graph = _build_graph(unet_name, prompt, negative_prompt)
     try:
-        image_bytes = await comfy_common.submit_and_wait(graph)
+        # track() detaches the actual render from this request's task, so
+        # a client disconnect (agent.py's caller getting cancelled) doesn't
+        # kill a render that's still going -- see render_jobs.py / #10.
+        image_bytes = await render_jobs.track(job_id, comfy_common.submit_and_wait(graph))
     except comfy_common.ComfyUIError as e:
         return {"error": str(e)}
 
-    # No server-side persistence (#11 stage 2) -- the bytes go straight back
-    # to the client over the tool_result SSE event as base64; the client is
-    # the only one who stores them (IndexedDB). image_id is just an opaque
-    # reference the model/client use to refer back to this image, not a row
-    # id -- nothing in this backend remembers it after this call returns.
+    # No server-side persistence of the result beyond the transient
+    # RenderJob outbox (#10) -- the bytes go straight back to the client
+    # over the tool_result SSE event as base64; the client is the only one
+    # who stores them for the long term (IndexedDB). image_id is job_id
+    # itself: the client already recorded that id from the render_job event
+    # before this render even started, so there's one id, not two.
     return {
-        "image_id": uuid.uuid4().hex,
+        "image_id": job_id,
+        "job_id": job_id,
         "image_b64": base64.b64encode(image_bytes).decode(),
         "content_type": "image/png",
         "prompt": prompt,
