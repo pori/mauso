@@ -36,7 +36,7 @@ TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "source_image_id": {"type": "integer", "description": "id of the image to edit."},
+                    "source_image_id": {"type": "string", "description": "id of the image to edit."},
                     "prompt": {"type": "string", "description": "What to change about the image."},
                 },
                 "required": ["source_image_id", "prompt"],

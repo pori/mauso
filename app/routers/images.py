@@ -1,23 +1,32 @@
-"""Serves ChatImage bytes (both agent-generated/edited images and
-user-uploaded ones) to the browser, and accepts uploads for the
-edit_image skill to work on. See chat_images.py / models.ChatImage.
+"""Images are client-side-only storage as of #11 stage 2 -- this router no
+longer accepts or persists uploads. What's left:
 
-Also accepts a URL instead of file bytes, for pasting an image copied from
-a web page (see static/app.js's paste handler): the browser clipboard often
-carries only the image's URL (not its bytes), so that has to be fetched
-server-side rather than via a client-side fetch(), which would be blocked
-by CORS for most third-party image hosts anyway."""
+- GET/DELETE /api/chat-images/{id}: legacy/migration-only. They still serve
+  and clean up ChatImage rows written before this stage shipped (and any
+  the maintainer-run migrate_encrypt_images.py script touched), so the
+  browser's one-time migration pass can pull old images into IndexedDB and
+  so stale rows can be cleaned up by hand. Nothing writes a new row through
+  this file anymore. The ChatImage table itself is a deliberate holdover --
+  dropping it is a separate, later, manual step (see PROJECT_NOTES.md).
+- POST /api/chat-images/fetch-url: stays, but is now stateless. Pasting an
+  image copied from a web page only gives the browser a URL (not bytes),
+  and fetching that URL has to happen server-side -- a client-side fetch()
+  would be blocked by CORS for most third-party image hosts, and the
+  SSRF guard below needs to run somewhere trusted either way. This handler
+  fetches, validates, and hands the bytes back to the client as base64;
+  it no longer stores them."""
+import base64
 import ipaddress
 import socket
 from urllib.parse import urljoin, urlparse
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from ..chat_images import read_chat_image_bytes, store_chat_image
+from ..chat_images import read_chat_image_bytes
 from ..config import settings
 from ..db import get_db
 from ..models import ChatImage
@@ -87,25 +96,10 @@ async def _fetch_image_bytes(url: str) -> tuple[bytes, str]:
     raise HTTPException(400, "Too many redirects.")
 
 
-@router.post("/api/chat-images")
-async def upload_chat_image(file: UploadFile, db: Session = Depends(get_db)):
-    if not (file.content_type or "").startswith("image/"):
-        raise HTTPException(400, f"Expected an image, got content-type '{file.content_type}'.")
-    data = await file.read()
-    if len(data) > settings.max_upload_bytes:
-        raise HTTPException(400, f"Image exceeds the {settings.max_upload_bytes // (1024 * 1024)}MB limit.")
-    sniffed = sniff_image_type(data)
-    if sniffed is None:
-        raise HTTPException(400, "That file's content doesn't match a supported image format (PNG, JPEG, GIF, WEBP).")
-    record = store_chat_image(db, data, sniffed, source="upload")
-    return {"id": record.id, "url": f"/api/chat-images/{record.id}"}
-
-
 @router.post("/api/chat-images/fetch-url")
-async def fetch_chat_image_from_url(body: FetchImageUrlRequest, db: Session = Depends(get_db)):
+async def fetch_chat_image_from_url(body: FetchImageUrlRequest):
     data, content_type = await _fetch_image_bytes(body.url.strip())
-    record = store_chat_image(db, data, content_type, source="url")
-    return {"id": record.id, "url": f"/api/chat-images/{record.id}"}
+    return {"data_b64": base64.b64encode(data).decode(), "content_type": content_type}
 
 
 @router.get("/api/chat-images/{image_id}")

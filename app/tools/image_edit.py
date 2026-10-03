@@ -17,7 +17,7 @@ import uuid
 from sqlalchemy.orm import Session
 
 from . import comfy_common
-from ..chat_images import read_chat_image_bytes, store_chat_image
+from ..chat_images import read_chat_image_bytes
 from ..models import ChatImage
 from ..upload_validation import is_valid_image
 from .image_gen import CLIP_NAME, DEFAULT_UNET, VAE_NAME
@@ -109,8 +109,14 @@ async def run(args: dict, db: Session, comfyui_checkpoint: str, attached_images:
     except comfy_common.ComfyUIError as e:
         return {"error": str(e)}
 
-    record = store_chat_image(db, image_bytes, "image/png", prompt=prompt, source="edited")
+    # No server-side persistence (#11 stage 2) -- same as generate_image,
+    # the edited bytes go straight back to the client as base64; nothing
+    # here remembers them past this call. image_id is an opaque reference
+    # for the model/client, not a row id.
     return {
-        "image_id": record.id, "image_url": f"/api/chat-images/{record.id}",
-        "prompt": prompt, "source_image_id": source_ref,
+        "image_id": uuid.uuid4().hex,
+        "image_b64": base64.b64encode(image_bytes).decode(),
+        "content_type": "image/png",
+        "prompt": prompt,
+        "source_image_id": source_ref,
     }

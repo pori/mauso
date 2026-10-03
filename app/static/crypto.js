@@ -97,14 +97,14 @@ function reqToPromise(req) {
   });
 }
 
-function bufToB64(buf) {
+export function bufToB64(buf) {
   const bytes = new Uint8Array(buf);
   let bin = "";
   for (const b of bytes) bin += String.fromCharCode(b);
   return btoa(bin);
 }
 
-function b64ToBuf(b64) {
+export function b64ToBuf(b64) {
   const bin = atob(b64);
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
@@ -307,6 +307,23 @@ export async function listImageIds() {
   const db = await openDB();
   const records = await reqToPromise(tx(db, "images", "readonly").getAll());
   return records.map((r) => r.id);
+}
+
+// One-time migration sentinel (#11 stage 2) -- mirrors getOrCreateSalt's
+// backfill idiom: a lazy, idempotent flag in "meta" rather than an eager
+// batch job. app.js checks this once on boot; if unset, it pulls every
+// still-server-side legacy image into the "images" store above, then
+// calls markImagesMigrated(). Existing conversation records are never
+// rewritten -- only this store gets backfilled.
+export async function hasImagesMigrated() {
+  const db = await openDB();
+  const existing = await reqToPromise(tx(db, "meta", "readonly").get("imagesMigratedV1"));
+  return !!existing;
+}
+
+export async function markImagesMigrated() {
+  const db = await openDB();
+  await reqToPromise(tx(db, "meta", "readwrite").put({ key: "imagesMigratedV1", value: true }));
 }
 
 // --- Browser-only notes storage ("notes" store) --------------------------

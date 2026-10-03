@@ -92,12 +92,11 @@ async def _fake_submit_and_wait(graph, timeout_polls=None):
 
 
 def test_edit_image_with_attached_source_does_not_persist_the_source_image(client, db_session, monkeypatch):
-    """A source image the browser attaches directly to the request (rather
-    than one already stored server-side via a prior /api/chat-images upload)
-    must never itself become a ChatImage row -- only the edited *output*
-    does, exactly as generate_image already does today. This is the concrete
-    slice of "no persistent server-side copy" this stage of #11 delivers:
-    the ChatImage table grows by exactly one row (the result), never two."""
+    """Neither the source image the browser attaches directly to the
+    request, nor the edited *output*, is ever written to the ChatImage
+    table -- #11 stage 2 removed generate_image/edit_image's own writes
+    entirely, so the table grows by zero rows regardless of what's
+    attached."""
     calls = {"n": 0}
 
     async def _fake_chat_completion(base_url, api_key, model, messages, tools=None):
@@ -137,9 +136,7 @@ def test_edit_image_with_attached_source_does_not_persist_the_source_image(clien
     assert resp.status_code == 200
 
     after = _row_counts(db_session)
-    assert after["chat_image"] == before["chat_image"] + 1
-    for model in ("app_setting", "document", "chunk", "profile", "note"):
-        assert after[model] == before[model]
+    assert after == before
 
 
 def test_search_notes_with_attached_corpus_does_not_touch_the_note_table(client, db_session, monkeypatch):

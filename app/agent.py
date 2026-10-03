@@ -67,7 +67,7 @@ async def _execute_tool(
     attached_notes: list, attached_doc_chunks: list,
 ) -> dict:
     if name == "generate_image":
-        return await image_gen.run(args, db, comfyui_checkpoint)
+        return await image_gen.run(args, comfyui_checkpoint)
     if name == "edit_image":
         return await image_edit.run(args, db, comfyui_checkpoint, attached_images)
     if name == "create_note":
@@ -124,6 +124,20 @@ async def run_agent_turn(
                     tavily_api_key, attached_images_by_id, attached_notes, attached_doc_chunks,
                 )
                 yield {"type": "tool_result", "name": name, "result": result}
+                if name in ("generate_image", "edit_image") and result.get("image_b64"):
+                    # Makes a freshly generated/edited image available to a
+                    # later edit_image call in this same turn via the
+                    # attached-images bag, the same path a client-attached
+                    # image already resolves through -- without ever
+                    # needing a ChatImage row. attached_images_by_id is the
+                    # same dict object passed into every _execute_tool call
+                    # in this loop, so mutating it here is visible to the
+                    # next iteration.
+                    attached_images_by_id[str(result["image_id"])] = {
+                        "id": result["image_id"],
+                        "data_b64": result["image_b64"],
+                        "content_type": result.get("content_type", "image/png"),
+                    }
                 working_messages.append({
                     "role": "tool", "tool_call_id": tc.get("id", ""), "content": json.dumps(result),
                 })

@@ -10,7 +10,10 @@ let availableModels = []; // [{id, vision}, ...] from /api/models
 let modelVisionSupport = new Map(); // model id -> bool, derived from availableModels on each refresh
 let availableProfiles = []; // [{ id, name, model, system_prompt }]
 let defaultModel = ""; // the Settings-page global default
-let pendingImageAttachments = []; // [{ id, url }] -- filled as images are uploaded via the attach button
+let pendingImageAttachments = []; // [{ id, url, source }] -- filled as images are attached via the attach button
+let imageKey = null; // HKDF subkey for the "images" IndexedDB store, derived once in boot()
+let activeBlobUrls = []; // blob: URLs for images currently rendered in the transcript -- revoked in renderMessages()
+let mentionBlobUrls = []; // blob: URLs for the @image mention dropdown's thumbnails -- revoked in hideMentionDropdown()
 
 // Whether streaming/new messages should auto-scroll the message pane to the
 // bottom. Starts true; goes false the moment the user scrolls away from the
@@ -195,6 +198,8 @@ window.addEventListener("popstate", () => {
 // ---------- Boot ----------
 
 async function boot() {
+  imageKey = await Crypto.deriveSubkey(Crypto.getSessionKeyRawBits(), "mauso-image-key");
+  await migrateImagesIfNeeded();
   await refreshFiles();
   await refreshModels();
   await refreshProfiles();
@@ -250,6 +255,47 @@ async function boot() {
     }
     persistCurrentConvo();
   });
+}
+
+// One-time, lazy migration (#11 stage 2): before this shipped, every image
+// lived server-side under an integer id, referenced from a conversation
+// record's image_url. Images now live only in the browser, so this walks
+// every persisted conversation once, pulls any not-yet-local legacy image's
+// bytes in via the still-available (read-only) GET route, and stores them
+// under their existing id in the "images" store. Conversation records
+// themselves are never rewritten -- image_url stays as a harmless fallback
+// field forever; resolveImageBytes() below tries IndexedDB first and only
+// falls back to fetching it if a lookup misses, so nothing here needs to
+// correct outgoing references. Guarded by Crypto.hasImagesMigrated() so
+// this only ever runs once per vault, mirroring getOrCreateSalt's backfill
+// idiom in crypto.js.
+async function migrateImagesIfNeeded() {
+  if (await Crypto.hasImagesMigrated()) return;
+  const alreadyLocal = new Set(await Crypto.listImageIds());
+  const records = await Crypto.listConversationRecords();
+  for (const r of records) {
+    let convo;
+    try {
+      convo = await Crypto.loadConversation(sessionKey, r.id);
+    } catch {
+      continue; // a record this passphrase can't decrypt isn't this migration's problem
+    }
+    for (const m of convo.messages || []) {
+      if (m.kind !== "image" || !m.image_url || alreadyLocal.has(m.image_id)) continue;
+      try {
+        const resp = await fetch(m.image_url);
+        if (!resp.ok) continue;
+        const contentType = resp.headers.get("content-type") || "image/png";
+        const bytes = new Uint8Array(await resp.arrayBuffer());
+        await Crypto.storeImage(imageKey, m.image_id, bytes, contentType);
+        alreadyLocal.add(m.image_id);
+      } catch {
+        // Best-effort -- one unreachable/already-gone legacy image
+        // shouldn't block the rest of the pass or the mark-done step below.
+      }
+    }
+  }
+  await Crypto.markImagesMigrated();
 }
 
 // Populates the model picker from the configured endpoint's /models list
@@ -579,9 +625,62 @@ function deriveTitle() {
   if (firstUser) currentConvo.title = firstUser.content.slice(0, 60);
 }
 
+// ---------- Image byte resolution (#11 stage 2) ----------
+//
+// Images now live only in IndexedDB ("images" store, see crypto.js). Every
+// display/vision/attach site resolves bytes through resolveImageBytes()
+// below: try the local store first, and only fall back to fetching
+// legacyUrl (the pre-#11-stage-2 server endpoint, still live read-only) if
+// that misses -- i.e. for an image this vault hasn't migrated/stored
+// locally yet. New images never get an image_url at all, so for them the
+// local lookup is the only path.
+
+async function resolveImageBytes(imageId, legacyUrl) {
+  const local = await Crypto.loadImage(imageKey, imageId);
+  if (local) return local;
+  if (!legacyUrl) return null;
+  try {
+    const resp = await fetch(legacyUrl);
+    if (!resp.ok) return null;
+    const contentType = resp.headers.get("content-type") || "image/png";
+    const bytes = new Uint8Array(await resp.arrayBuffer());
+    return { bytes, contentType };
+  } catch {
+    return null;
+  }
+}
+
+function trackedBlobUrl(bytes, contentType) {
+  const url = URL.createObjectURL(new Blob([bytes], { type: contentType }));
+  activeBlobUrls.push(url);
+  return url;
+}
+
+function revokeTrackedBlobUrls() {
+  for (const url of activeBlobUrls) URL.revokeObjectURL(url);
+  activeBlobUrls = [];
+}
+
+function trackedMentionBlobUrl(bytes, contentType) {
+  const url = URL.createObjectURL(new Blob([bytes], { type: contentType }));
+  mentionBlobUrls.push(url);
+  return url;
+}
+
+function revokeMentionBlobUrls() {
+  for (const url of mentionBlobUrls) URL.revokeObjectURL(url);
+  mentionBlobUrls = [];
+}
+
 // ---------- Rendering ----------
 
 function renderMessages() {
+  // Every call here means the previously-rendered transcript's images (if
+  // any) are about to be thrown away -- revoke their blob: URLs before
+  // clearing the DOM, not after, so nothing can still reference a revoked
+  // one. Covers every conversation-switch path (newConversation,
+  // openConversation, retryMessage all funnel through this).
+  revokeTrackedBlobUrls();
   const box = el("messages");
   box.innerHTML = "";
   for (const m of currentConvo.messages) box.appendChild(renderMessage(m));
@@ -616,7 +715,10 @@ function renderMessage(m) {
     p.textContent = `🖼 ${label}`;
     p.appendChild(idSpan);
     const img = document.createElement("img");
-    img.src = m.image_url;
+    img.src = LOADING_THUMB_SRC;
+    resolveImageBytes(m.image_id, m.image_url).then((resolved) => {
+      if (resolved) img.src = trackedBlobUrl(resolved.bytes, resolved.contentType);
+    });
     div.appendChild(p);
     const tag = imageTagForId(m.image_id);
     if (tag) {
@@ -682,6 +784,29 @@ function resolveMentions(text, tagToId) {
   });
 }
 
+function imageUrlForId(imageId) {
+  const entry = imageTagEntries().find((e) => e.id === imageId);
+  return entry ? entry.url : null;
+}
+
+// Images explicitly @-mentioned anywhere in the conversation's stored text
+// -- the sole "attach this for edit_image to work on" signal (per the #11
+// UX decision: no separate attach control). Scoping attached_images to
+// just these, rather than every image ever in the conversation, keeps the
+// outgoing request body from growing without bound as a conversation
+// accumulates images that are never referred back to.
+function mentionedImageIds(tagToId) {
+  const ids = new Set();
+  for (const m of currentConvo.messages) {
+    if (typeof m.content !== "string") continue;
+    for (const match of m.content.matchAll(MENTION_TOKEN_RE)) {
+      const id = tagToId.get(`image${match[1]}`);
+      if (id != null) ids.add(id);
+    }
+  }
+  return ids;
+}
+
 let mentionState = null; // { start, end, entries, selectedIndex } while the dropdown is open; else null
 
 // Finds the "@word" token (if any) the caret currently sits inside, so
@@ -725,8 +850,11 @@ function showMentionDropdown(entries, mention) {
     item.type = "button";
     item.className = "mention-item" + (i === 0 ? " selected" : "");
     const img = document.createElement("img");
-    img.src = entry.url;
+    img.src = LOADING_THUMB_SRC;
     img.alt = "";
+    resolveImageBytes(entry.id, entry.url).then((resolved) => {
+      if (resolved) img.src = trackedMentionBlobUrl(resolved.bytes, resolved.contentType);
+    });
     const label = document.createElement("span");
     label.textContent = `@${entry.tag}`;
     item.append(img, label);
@@ -743,6 +871,7 @@ function hideMentionDropdown() {
   mentionState = null;
   el("mention-dropdown").hidden = true;
   el("mention-dropdown").innerHTML = "";
+  revokeMentionBlobUrls();
 }
 
 function moveMentionSelection(delta) {
@@ -988,27 +1117,26 @@ async function onAttachChange(e) {
   }
 }
 
-// Uploads one file, showing an instant local blob: preview before the
-// upload round-trip even starts -- no reason to make the user wait to see
-// what they picked -- then swaps it for the stored /api/chat-images URL.
+// Reads the file directly and stores it in the local "images" store --
+// no server round-trip at all (#11 stage 2). Shows an instant local blob:
+// preview, which stays as the thumbnail's permanent src since there's
+// nothing to swap it for anymore.
 async function uploadAttachment(file) {
   const localPreviewUrl = URL.createObjectURL(file);
-  const holder = { id: null, url: null, source: "upload" }; // filled in below; the remove button closes over this
+  const holder = { id: null, source: "upload", previewUrl: localPreviewUrl }; // filled in below; the remove button closes over this
   const thumb = addAttachThumb(localPreviewUrl, holder);
-  el("attach-status").textContent = "Uploading...";
-  const form = new FormData();
-  form.append("file", file);
-  const resp = await fetch("/api/chat-images", { method: "POST", body: form });
-  URL.revokeObjectURL(localPreviewUrl);
-  if (!resp.ok) {
+  const contentType = file.type || "image/png";
+  const id = crypto.randomUUID();
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    await Crypto.storeImage(imageKey, id, bytes, contentType);
+  } catch {
+    URL.revokeObjectURL(localPreviewUrl);
     thumb.remove();
-    el("attach-status").textContent = `${file.name}: upload failed.`;
+    el("attach-status").textContent = `${file.name}: couldn't store that image.`;
     return;
   }
-  const result = await resp.json();
-  holder.id = result.id;
-  holder.url = result.url;
-  thumb.querySelector("img").src = result.url;
+  holder.id = id;
   pendingImageAttachments.push(holder);
   updateAttachStatus();
 }
@@ -1020,11 +1148,14 @@ const LOADING_THUMB_SRC = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAE
 
 // Same shape as uploadAttachment, but for an image pasted as a URL (or
 // found in pasted HTML) rather than as clipboard file bytes -- see
-// onComposerPaste. The fetch happens server-side (chat-images/fetch-url)
-// since a client-side fetch() of an arbitrary third-party image host would
-// usually be blocked by CORS before the bytes could be read into a blob.
+// onComposerPaste. The fetch still happens server-side
+// (chat-images/fetch-url, SSRF-guarded) since a client-side fetch() of an
+// arbitrary third-party image host would usually be blocked by CORS before
+// the bytes could be read into a blob -- but the server no longer stores
+// what it fetches (#11 stage 2), it just hands the bytes back as base64
+// for the client to store locally, same as a direct upload.
 async function uploadAttachmentFromUrl(url) {
-  const holder = { id: null, url: null, source: "url" };
+  const holder = { id: null, source: "url", previewUrl: null };
   const thumb = addAttachThumb(LOADING_THUMB_SRC, holder);
   thumb.classList.add("attach-thumb-loading");
   el("attach-status").textContent = "Fetching image...";
@@ -1047,10 +1178,21 @@ async function uploadAttachmentFromUrl(url) {
     return;
   }
   const result = await resp.json();
-  holder.id = result.id;
-  holder.url = result.url;
+  const bytes = new Uint8Array(Crypto.b64ToBuf(result.data_b64));
+  const contentType = result.content_type || "image/png";
+  const id = crypto.randomUUID();
+  try {
+    await Crypto.storeImage(imageKey, id, bytes, contentType);
+  } catch {
+    thumb.remove();
+    el("attach-status").textContent = "Couldn't store that image.";
+    return;
+  }
+  const previewUrl = URL.createObjectURL(new Blob([bytes], { type: contentType }));
+  holder.id = id;
+  holder.previewUrl = previewUrl;
   thumb.classList.remove("attach-thumb-loading");
-  thumb.querySelector("img").src = result.url;
+  thumb.querySelector("img").src = previewUrl;
   pendingImageAttachments.push(holder);
   updateAttachStatus();
 }
@@ -1108,6 +1250,8 @@ function addAttachThumb(previewUrl, holder) {
   removeBtn.addEventListener("click", () => {
     pendingImageAttachments = pendingImageAttachments.filter((a) => a !== holder);
     thumb.remove();
+    if (holder.previewUrl) URL.revokeObjectURL(holder.previewUrl);
+    if (holder.id) Crypto.deleteImage(holder.id);
     updateAttachStatus();
   });
   thumb.append(img, removeBtn);
@@ -1134,22 +1278,20 @@ function clearAttachPreview() {
 }
 
 // Data: URLs for images already sent to the LLM this session, keyed by
-// image_id -- avoids re-fetching/re-encoding the same image from
-// /api/chat-images on every turn (the whole history is resent each turn).
+// image_id -- avoids re-reading/re-encoding the same image from the
+// "images" store on every turn (the whole history is resent each turn).
 // Deliberately NOT stored on the message object / currentConvo.messages,
 // since that gets persisted to IndexedDB via persistCurrentConvo.
 const imageDataUrlCache = new Map();
 
-async function imageToDataUrl(imageId, url) {
+// Returns null if the image can't be resolved at all (neither locally nor,
+// for a pre-migration legacy reference, via legacyUrl) -- callers fall back
+// to the text-only placeholder in that case.
+async function imageToDataUrl(imageId, legacyUrl) {
   if (imageDataUrlCache.has(imageId)) return imageDataUrlCache.get(imageId);
-  const resp = await fetch(url);
-  const blob = await resp.blob();
-  const dataUrl = await new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(blob);
-  });
+  const resolved = await resolveImageBytes(imageId, legacyUrl);
+  if (!resolved) return null;
+  const dataUrl = `data:${resolved.contentType};base64,${Crypto.bufToB64(resolved.bytes)}`;
   imageDataUrlCache.set(imageId, dataUrl);
   return dataUrl;
 }
@@ -1171,6 +1313,9 @@ async function toApiMessage(m, visionCapable, tagToId) {
       return { role: m.role, content: placeholder };
     }
     const dataUrl = await imageToDataUrl(m.image_id, m.image_url);
+    if (!dataUrl) {
+      return { role: m.role, content: placeholder };
+    }
     return {
       role: m.role,
       content: [
@@ -1203,7 +1348,10 @@ async function onSend(e) {
   el("attach-input").value = "";
 
   for (const attachment of attachments) {
-    appendMessage({ role: "user", kind: "image", image_id: attachment.id, image_url: attachment.url, source: attachment.source || "upload" });
+    appendMessage({ role: "user", kind: "image", image_id: attachment.id, source: attachment.source || "upload" });
+    // The composer preview's blob: URL is now obsolete -- the just-appended
+    // message renders its own, freshly resolved from the "images" store.
+    if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
   }
   if (text) {
     appendMessage({ role: "user", content: text, timestamp: Date.now() });
@@ -1268,6 +1416,14 @@ async function runAgentTurn() {
       .map((m) => toApiMessage(m, visionCapable, tagToId))
   );
 
+  const attachedImages = [];
+  for (const id of mentionedImageIds(tagToId)) {
+    const resolved = await resolveImageBytes(id, imageUrlForId(id));
+    if (resolved) {
+      attachedImages.push({ id, data_b64: Crypto.bufToB64(resolved.bytes), content_type: resolved.contentType });
+    }
+  }
+
   activeAbortController = new AbortController();
   setSendingState(true);
 
@@ -1280,6 +1436,7 @@ async function runAgentTurn() {
         active_document_ids: currentConvo.activeDocumentIds,
         model: currentConvo.model || "",
         profile_id: currentConvo.profileId || null,
+        attached_images: attachedImages,
       }),
       signal: activeAbortController.signal,
     });
@@ -1298,7 +1455,7 @@ async function runAgentTurn() {
         const line = part.trim();
         if (!line.startsWith("data:")) continue;
         const event = JSON.parse(line.slice(5).trim());
-        handleEvent(event, assistantMsg, assistantNode, statusEl, turnTiming);
+        await handleEvent(event, assistantMsg, assistantNode, statusEl, turnTiming);
       }
     }
   } catch (err) {
@@ -1403,7 +1560,7 @@ function setThinking(node, on) {
   }
 }
 
-function handleEvent(event, assistantMsg, assistantNode, statusEl, turnTiming) {
+async function handleEvent(event, assistantMsg, assistantNode, statusEl, turnTiming) {
   if (event.type === "token") {
     if (assistantNode.classList.contains("thinking")) setThinking(assistantNode, false);
     assistantMsg.content += event.content;
@@ -1420,10 +1577,15 @@ function handleEvent(event, assistantMsg, assistantNode, statusEl, turnTiming) {
     const assistantWrap = assistantNode.parentElement;
     const elapsedMs = turnTiming.toolStartTime != null ? performance.now() - turnTiming.toolStartTime : null;
     turnTiming.toolStartTime = null;
-    if ((event.name === "generate_image" || event.name === "edit_image") && event.result.image_url) {
+    if ((event.name === "generate_image" || event.name === "edit_image") && event.result.image_b64) {
+      // Store the bytes locally before inserting the message -- renderMessage's
+      // resolution for this message id then finds them immediately, no
+      // round trip to anywhere.
+      const bytes = new Uint8Array(Crypto.b64ToBuf(event.result.image_b64));
+      await Crypto.storeImage(imageKey, event.result.image_id, bytes, event.result.content_type || "image/png");
       insertMessage({
         role: "assistant", kind: "image", turnId: assistantMsg.turnId, elapsedMs,
-        image_id: event.result.image_id, image_url: event.result.image_url,
+        image_id: event.result.image_id,
         prompt: event.result.prompt, source: event.name === "edit_image" ? "edited" : "generated",
       }, assistantWrap);
     } else if (event.name === "create_note") {

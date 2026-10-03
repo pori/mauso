@@ -15,13 +15,17 @@
 # conversation transcripts are end-to-end encrypted in the browser (Web
 # Crypto, AES-GCM, key derived from a passphrase that never leaves the
 # client) and live only in the browser's IndexedDB -- this backend never
-# stores them, not even transiently beyond a single in-flight request. It
-# DOES store, in plaintext on disk (mauso-data volume) like every other
-# stack here: the configured LLM endpoint's API key (encrypted at rest with
-# MAUSO_SECRET_KEY, see .env.example), any files uploaded for the RAG skill
-# (the backend has to read/chunk/embed/search them, so it can't be blind to
-# their content), and any images uploaded or generated/edited (ComfyUI has
-# to receive the actual bytes). See README.md for the full picture.
+# stores them, not even transiently beyond a single in-flight request.
+# Images are the same way as of #11 stage 2 -- generate_image/edit_image
+# touch bytes only transiently, in memory, to call ComfyUI; the browser is
+# the only store. The mauso-data volume may still hold legacy chat_image
+# rows written before that shipped -- read-only now, pending a manual
+# table drop once the maintainer confirms the browser-side migration. This
+# backend DOES still store, in plaintext on disk (mauso-data volume) like
+# every other stack here: the configured LLM endpoint's API key (encrypted
+# at rest with MAUSO_SECRET_KEY, see .env.example), and any files uploaded
+# for the RAG skill (the backend has to read/chunk/embed/search them, so
+# it can't be blind to their content). See README.md for the full picture.
 name: mauso
 
 networks:
@@ -30,7 +34,7 @@ networks:
     name: ${MAUSO_NETWORK:-homellm_homellm}
 
 volumes:
-  mauso-data: # SQLite DB: provider settings, uploaded RAG docs/chunks/embeddings, chat images
+  mauso-data: # SQLite DB: provider settings, uploaded RAG docs/chunks/embeddings, legacy chat images pending drop
 
 services:
   mauso:

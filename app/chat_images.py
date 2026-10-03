@@ -1,15 +1,18 @@
-"""Shared helper for persisting a ChatImage row -- used by the upload route
-and by the generate_image/edit_image tools alike, so every image that
-exists in a conversation (user-supplied or agent-produced) is addressed the
-same way: an integer id, fetched via GET /api/chat-images/{id}.
+"""Helper for the legacy ChatImage table. As of #11 stage 2, images are
+client-side-only -- generate_image/edit_image no longer call
+store_chat_image, and the upload route that used to call it is gone.
+store_chat_image() stays only because tests still use it to seed legacy
+rows for the GET/DELETE routes' and image_edit.py's DB-fallback path's
+coverage; it is not a live write path anymore. read_chat_image_bytes() is
+still live -- it's how the browser's one-time migration pass and the
+legacy GET route read old rows.
 
-Blobs are encrypted at rest with MAUSO_SECRET_KEY (same Fernet mechanism as
-the provider API keys, see crypto.py) -- this protects against someone
-reading mauso.db/its backups directly, though the running mauso process can
-always decrypt (it holds the key), so it's not the stronger "server never
-holds a usable copy" guarantee client-side encryption would give; see
-PROJECT_NOTES.md's Privacy/security model section for that tradeoff and the
-design sketch for doing it properly later.
+Blobs already on disk stay encrypted at rest with MAUSO_SECRET_KEY (same
+Fernet mechanism as the provider API keys, see crypto.py) -- this protects
+against someone reading mauso.db/its backups directly, though the running
+mauso process can always decrypt (it holds the key). Dropping the
+ChatImage table entirely (and this module with it) is a separate, later,
+manual step -- see PROJECT_NOTES.md.
 """
 import logging
 

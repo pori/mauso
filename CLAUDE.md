@@ -8,7 +8,7 @@ If a `PROJECT_NOTES.md` is present locally, it's a maintained handoff doc with t
 
 mauso: an agentic AI chat PoC. Point it at any OpenAI-compatible LLM endpoint and chat with it, with six tool-calling skills: `generate_image` / `edit_image` (via this host's ComfyUI), `create_note` (pure formatting, no storage), `search_notes` (keyword search over notes persisted via the Notes page), `search_documents` (RAG over uploaded files), and `web_search` (live search via the Tavily API). Plain FastAPI + server-rendered Jinja templates + vanilla JS/CSS — no frontend build step, no framework.
 
-**The defining architectural fact**: conversation history is end-to-end encrypted in the browser (Web Crypto AES-GCM-256, key from a user passphrase via PBKDF2) and lives only in IndexedDB. This backend never receives, stores, or logs a conversation transcript — not even transiently. It *does* store, in plaintext on disk, the LLM provider's API key and the Tavily API key (both encrypted at rest with a separate server-held `MAUSO_SECRET_KEY`), uploaded RAG documents + their chunks/embeddings, images (uploaded or agent-generated), and notes saved via the Notes page. Read the "Privacy model" section of `README.md` before touching anything that looks like it persists chat content — the client owns all conversation persistence; the backend must stay blind to it by design, not by accident. Note that `web_search` is the one skill that sends data (the query text) to a third party besides the configured LLM endpoint.
+**The defining architectural fact**: conversation history is end-to-end encrypted in the browser (Web Crypto AES-GCM-256, key from a user passphrase via PBKDF2) and lives only in IndexedDB. This backend never receives, stores, or logs a conversation transcript — not even transiently. It *does* store, in plaintext on disk, the LLM provider's API key and the Tavily API key (both encrypted at rest with a separate server-held `MAUSO_SECRET_KEY`), uploaded RAG documents + their chunks/embeddings, and notes saved via the Notes page. Images used to be in that list too; as of #11 stage 2 they're client-side-only (IndexedDB), with only legacy pre-migration rows left sitting read-only in the `chat_image` table. Read the "Privacy model" section of `README.md` before touching anything that looks like it persists chat content — the client owns all conversation persistence; the backend must stay blind to it by design, not by accident. Note that `web_search` is the one skill that sends data (the query text) to a third party besides the configured LLM endpoint.
 
 ## Commands
 
@@ -61,14 +61,14 @@ The Dockerfile's base image is `mirror.gcr.io/library/python:3.12-slim`, not a b
 
 - `main.py` — FastAPI app, mounts routers + `/static`, serves the 3 page routes (chat, files, settings).
 - `config.py` — env-var-sourced `Settings` (paths, timeouts, `DEFAULT_CHAT_MODEL`). Per-provider values (endpoint URL, API key, chat/embedding model) are deliberately **not** here — those are runtime-editable via the Settings page, stored in the `app_setting` table (`settings_store.py`), and always win over the env var once set.
-- `db.py` / `models.py` — SQLAlchemy, sqlite at `/data/mauso.db`. Tables: `AppSetting`, `Document`, `Chunk`, `Profile`, `ChatImage`, `Note`.
+- `db.py` / `models.py` — SQLAlchemy, sqlite at `/data/mauso.db`. Tables: `AppSetting`, `Document`, `Chunk`, `Profile`, `ChatImage`, `Note`. `ChatImage` is legacy-only as of #11 stage 2 (images are client-side-only now, see below) — nothing writes a new row to it anymore; it stays only to serve/clean up rows from before that shipped, pending a manual drop once the browser-side migration is confirmed.
 - `crypto.py` — Fernet encrypt/decrypt for **provider API keys** (LLM endpoint, Tavily). Unrelated to conversation encryption, which is entirely client-side (`static/crypto.js`).
 - `llm_client.py` — OpenAI-compatible client: `chat_completion`, `chat_completion_stream`, `embed`, `list_models`.
 - `agent.py` — the tool-calling loop, see below.
 - `rag_store.py` — chunking + cosine-similarity search, pure Python, no vector DB.
-- `chat_images.py` — shared `ChatImage` persistence helper.
+- `chat_images.py` — legacy `ChatImage` read/seed helper; `store_chat_image()` has no production callers left, kept only for tests and the still-live legacy `GET` route.
 - `tools/registry.py` — OpenAI function-calling schemas for all 6 skills. `tools/comfy_common.py` has shared ComfyUI submit/poll/upload plumbing used by both image tools. `tools/notes.py` has both `create_note` (formatting only) and `search_notes` (queries the `Note` table). `tools/web_search.py` calls the Tavily `/search` API directly (not the configured LLM endpoint) and needs its own API key from the Settings page.
-- `routers/chat.py` — `POST /api/chat`, SSE streaming agent turn. `routers/settings_router.py`, `routers/files.py` (RAG upload/list/delete), `routers/images.py` (`ChatImage` blobs by id), `routers/notes_router.py` (`Note` CRUD), `routers/profiles.py` (`Profile` CRUD).
+- `routers/chat.py` — `POST /api/chat`, SSE streaming agent turn. `routers/settings_router.py`, `routers/files.py` (RAG upload/list/delete), `routers/images.py` (legacy `ChatImage` reads + the stateless SSRF-guarded `fetch-url` helper — see below), `routers/notes_router.py` (`Note` CRUD), `routers/profiles.py` (`Profile` CRUD).
 
 ### The agent loop (`agent.run_agent_turn`)
 
@@ -78,9 +78,9 @@ The Dockerfile's base image is `mirror.gcr.io/library/python:3.12-slim`, not a b
 
 The two-call design (non-streaming for the tool-decision phase, a separate streaming call for the final answer) trades an extra LLM roundtrip for avoiding the complexity of reassembling partial `tool_calls` JSON across SSE chunks. `routers/chat.py` wraps the generator in a `StreamingResponse`; nothing server-side persists any of it.
 
-### Images are UI-only artifacts referenced by id
+### Images are client-side-only artifacts referenced by an opaque id
 
-Both agent-generated and user-uploaded images are addressed uniformly through `/api/chat-images/{id}` (a small integer id), so the agent can chain edits against "the image from a few turns ago." Since images/notes never round-trip back to the model automatically, `app.js`'s `toApiMessage()` inserts a `[Image id=N: ...]` / `[Note "..."]` text placeholder when building the API request, so the model can still reference them in later turns.
+As of #11 stage 2, images live only in the browser's IndexedDB `images` store (see `crypto.js`'s `storeImage`/`loadImage`), addressed by a client-generated opaque string id (not the server's old integer sequence) — both agent-generated and user-uploaded ones, so the agent can chain edits against "the image from a few turns ago." `generate_image`/`edit_image` never persist their output server-side; they return it inline as base64 in the `tool_result` SSE event (`image_b64`/`content_type`), and `app.js`'s `handleEvent` stores it locally before rendering. `edit_image`'s source resolves from the request's `attached_images` bag first (populated from `@imageN`-mentioned images in `runAgentTurn`'s POST body — the sole attach-for-editing signal, no separate attach control) and `agent.py`'s tool loop also seeds that same bag with a just-generated/edited image's bytes so a same-turn chain (generate then edit) works without ever touching a DB row; only if neither of those resolve it does `image_edit.py` fall back to the legacy `ChatImage` table by integer id, for images from before this shipped. `app.js`'s `resolveImageBytes()` is the one place every display/vision/attach site resolves bytes through: local store first, a fetch to the still-live-but-read-only `GET /api/chat-images/{id}` only as a fallback for a not-yet-migrated legacy reference. Since images/notes never round-trip back to the model automatically, `app.js`'s `toApiMessage()` inserts a `[Image id=N: ...]` / `[Note "..."]` text placeholder when building the API request, so the model can still reference them in later turns.
 
 ### Frontend (`app/static/`, `app/templates/`)
 
@@ -101,5 +101,5 @@ Both agent-generated and user-uploaded images are addressed uniformly through `/
 ## Known gaps (accepted, not oversights)
 
 - `generate_image`/`edit_image` build the FLUX.2 Klein 9B Distilled workflow (UNETLoader/CLIPLoader(flux2)/VAELoader + RandomNoise/CFGGuider/SamplerCustomAdvanced, not a plain checkpoint+KSampler graph) against `flux-2-klein-9b-fp8.safetensors` on this host's ComfyUI — see `image_gen.py`/`image_edit.py`. The edit workflow conditions via `ReferenceLatent`, not partial-denoise img2img, so it has no `negative_prompt`/`denoise` knobs.
-- No delete endpoint for `ChatImage` rows yet — they accumulate in the `mauso-data` volume.
+- `ChatImage` rows: a `DELETE /api/chat-images/{id}` route exists for manual cleanup, but nothing automates it — legacy rows from before #11 stage 2 sit in the `mauso-data` volume until the maintainer either deletes them by hand or drops the table entirely (a separate, deliberately manual follow-up; see `PROJECT_NOTES.md`).
 - No automated test suite.

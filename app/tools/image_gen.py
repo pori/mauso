@@ -11,12 +11,10 @@ family (not independently swappable), so they're hardcoded. The UNET
 filename can still be overridden via the Settings page's "ComfyUI
 checkpoint" field if this host's model layout changes.
 """
+import base64
 import uuid
 
-from sqlalchemy.orm import Session
-
 from . import comfy_common
-from ..chat_images import store_chat_image
 
 DEFAULT_UNET = "flux-2-klein-9b-fp8.safetensors"
 CLIP_NAME = "qwen_3_8b_fp8mixed.safetensors"
@@ -56,7 +54,7 @@ def _build_graph(unet_name: str, prompt: str, negative_prompt: str) -> dict:
     }
 
 
-async def run(args: dict, db: Session, comfyui_checkpoint: str) -> dict:
+async def run(args: dict, comfyui_checkpoint: str) -> dict:
     prompt = (args.get("prompt") or "").strip()
     negative_prompt = (args.get("negative_prompt") or "").strip()
     if not prompt:
@@ -69,5 +67,14 @@ async def run(args: dict, db: Session, comfyui_checkpoint: str) -> dict:
     except comfy_common.ComfyUIError as e:
         return {"error": str(e)}
 
-    record = store_chat_image(db, image_bytes, "image/png", prompt=prompt, source="generated")
-    return {"image_id": record.id, "image_url": f"/api/chat-images/{record.id}", "prompt": prompt}
+    # No server-side persistence (#11 stage 2) -- the bytes go straight back
+    # to the client over the tool_result SSE event as base64; the client is
+    # the only one who stores them (IndexedDB). image_id is just an opaque
+    # reference the model/client use to refer back to this image, not a row
+    # id -- nothing in this backend remembers it after this call returns.
+    return {
+        "image_id": uuid.uuid4().hex,
+        "image_b64": base64.b64encode(image_bytes).decode(),
+        "content_type": "image/png",
+        "prompt": prompt,
+    }

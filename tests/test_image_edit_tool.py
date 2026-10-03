@@ -75,6 +75,8 @@ def test_db_backed_source_still_works_unchanged(db_session, monkeypatch):
     assert "error" not in result
     assert result["source_image_id"] == record.id
     assert result["image_id"] != record.id
+    assert result["image_b64"] == base64.b64encode(b"fake-output-bytes").decode()
+    assert "image_url" not in result
     filename, content_type, data = _fake_upload_source_image.calls[0]
     assert content_type == "image/jpeg"
     assert data == b"original-bytes"
@@ -89,6 +91,8 @@ def test_attached_image_is_used_without_any_db_lookup(db_session, monkeypatch):
 
     assert "error" not in result
     assert result["source_image_id"] == "att-1"
+    assert result["image_b64"] == base64.b64encode(b"fake-output-bytes").decode()
+    assert "image_url" not in result
     filename, content_type, data = _fake_upload_source_image.calls[0]
     assert content_type == "image/png"
     assert data == FAKE_PNG
@@ -160,6 +164,6 @@ def test_attached_image_does_not_create_a_chat_image_row(db_session, monkeypatch
 
     after = len(db_session.execute(select(ChatImage)).scalars().all())
     assert "error" not in result
-    # Exactly one new row -- the edited *output* -- never a row for the
-    # attached *source*.
-    assert after == before + 1
+    # Zero new rows -- #11 stage 2 removed edit_image's own persistence of
+    # the output, same as it never persisted the attached source.
+    assert after == before
