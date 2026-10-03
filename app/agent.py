@@ -9,6 +9,7 @@ events out, that's the whole contract. The caller (routers/chat.py) is
 responsible for relaying events to the client; the client is responsible
 for encrypting and storing the resulting transcript.
 """
+import asyncio
 import json
 import logging
 from typing import AsyncIterator
@@ -61,6 +62,32 @@ def _build_system_prompt(tool_schemas: list, profile_prompt: str = "") -> str:
     return prompt
 
 
+_HEARTBEAT_DONE = "_with_heartbeat_done"  # internal sentinel, never reaches the client -- see the loop below
+
+
+async def _with_heartbeat(coro):
+    """Runs coro to completion, yielding a {"type": "heartbeat"} event
+    roughly every settings.sse_heartbeat_interval_seconds while it's still
+    pending, then a final {"type": _HEARTBEAT_DONE, "result": ...} event
+    (async generators can't `return` a value, so the result has to be
+    yielded like everything else -- callers pull it out of that last
+    event and must not forward it downstream). The SSE response sends
+    literally nothing until the first event is yielded -- the
+    non-streaming "does the model want a tool?" call (and a slow tool
+    execution) can legitimately take well over a minute (vision-capable
+    calls especially), and some clients enforce their own idle/request
+    timeout well under that, reporting a spurious failure even though the
+    server goes on to finish normally. A heartbeat keeps bytes flowing
+    often enough that this never happens."""
+    task = asyncio.ensure_future(coro)
+    while True:
+        done, _ = await asyncio.wait({task}, timeout=settings.sse_heartbeat_interval_seconds)
+        if task in done:
+            yield {"type": _HEARTBEAT_DONE, "result": task.result()}
+            return
+        yield {"type": "heartbeat"}
+
+
 async def _execute_tool(
     name: str, args: dict, db: Session, active_document_ids: list, base_url: str, api_key: str,
     embedding_model: str, comfyui_checkpoint: str, tavily_api_key: str, attached_images: dict,
@@ -106,7 +133,14 @@ async def run_agent_turn(
 
     try:
         for _ in range(settings.max_agent_tool_iterations):
-            msg = await llm_client.chat_completion(base_url, api_key, model, working_messages, tools=tool_schemas or None)
+            msg = None
+            async for ev in _with_heartbeat(
+                llm_client.chat_completion(base_url, api_key, model, working_messages, tools=tool_schemas or None)
+            ):
+                if ev["type"] == _HEARTBEAT_DONE:
+                    msg = ev["result"]
+                else:
+                    yield ev
             tool_calls = msg.get("tool_calls")
             if not tool_calls:
                 break
@@ -130,10 +164,15 @@ async def run_agent_turn(
                     job = render_jobs.create_job(db, "generate" if name == "generate_image" else "edit")
                     job_id = job.id
                     yield {"type": "render_job", "job_id": job_id, "name": name}
-                result = await _execute_tool(
+                result = None
+                async for ev in _with_heartbeat(_execute_tool(
                     name, args, db, active_document_ids, base_url, api_key, embedding_model, comfyui_checkpoint,
                     tavily_api_key, attached_images_by_id, attached_notes, attached_doc_chunks, job_id,
-                )
+                )):
+                    if ev["type"] == _HEARTBEAT_DONE:
+                        result = ev["result"]
+                    else:
+                        yield ev
                 yield {"type": "tool_result", "name": name, "result": result}
                 if name in ("generate_image", "edit_image") and result.get("image_b64"):
                     # Makes a freshly generated/edited image available to a

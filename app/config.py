@@ -33,6 +33,14 @@ class Settings:
 
     max_agent_tool_iterations: int = int(os.environ.get("MAX_AGENT_TOOL_ITERATIONS", "5"))
 
+    # How often to send an SSE heartbeat while waiting on a slow
+    # non-streaming LLM call or tool execution, so the connection doesn't
+    # go silent long enough to trip a client's own idle/request timeout
+    # (observed with vision-capable calls -- see agent.py's
+    # _with_heartbeat). Comfortably under a typical ~60s default client
+    # timeout even with some jitter.
+    sse_heartbeat_interval_seconds: float = float(os.environ.get("SSE_HEARTBEAT_INTERVAL", "15"))
+
     # How long a finished (succeeded/failed) RenderJob row is kept if
     # nothing ever picks it up (client never reconnected) -- see
     # render_jobs.py. Swept opportunistically on each new job, not by a

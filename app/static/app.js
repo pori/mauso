@@ -1721,7 +1721,14 @@ function setThinking(node, on) {
 }
 
 async function handleEvent(event, assistantMsg, assistantNode, statusEl, turnTiming) {
-  if (event.type === "token") {
+  if (event.type === "heartbeat") {
+    // Sent periodically while the server is waiting on a slow non-
+    // streaming LLM call or tool execution (vision calls especially) so
+    // the connection doesn't go long enough without bytes to trip our own
+    // network stack's idle/request timeout -- see agent.py's
+    // _with_heartbeat. Nothing to do with it client-side; its only job is
+    // to have arrived at all.
+  } else if (event.type === "token") {
     if (assistantNode.classList.contains("thinking")) setThinking(assistantNode, false);
     assistantMsg.content += event.content;
     assistantNode.innerHTML = renderMarkdown(assistantMsg.content);
