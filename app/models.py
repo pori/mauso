@@ -77,6 +77,34 @@ class Note(Base):
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
+class RenderJob(Base):
+    """Tracks a generate_image/edit_image render across the request that
+    started it, specifically so the render survives that request's task
+    being cancelled (mobile tab backgrounded/navigated away mid-render --
+    see #10). Deliberately holds no prompt/other params: the client
+    already has those from the tool_call SSE event it received before the
+    render started, so there's nothing here for the server to echo back --
+    this table only needs to answer "did it finish, and if so with what
+    bytes" for a client that reconnects later. `id` is an opaque token
+    (render_jobs.create_job) that doubles as the resulting image's id, so
+    the client's own pending-placeholder message already carries the right
+    key to poll with. `result_data` is Fernet-encrypted at rest (same
+    crypto.encrypt_bytes/decrypt_bytes path as provider API keys) and is a
+    transient outbox, not storage -- deleted by the client as soon as it's
+    pulled the bytes into its own IndexedDB, swept by render_jobs.py if
+    nothing ever picks it up."""
+    __tablename__ = "render_job"
+
+    id = Column(String, primary_key=True)
+    kind = Column(String, nullable=False)  # generate | edit
+    status = Column(String, nullable=False, default="queued")  # queued|running|succeeded|failed
+    error = Column(Text, default="")
+    result_data = Column(LargeBinary, nullable=True)
+    result_content_type = Column(String, default="image/png")
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class ChatImage(Base):
     """An image that exists in a conversation -- either uploaded by the user
     (for the edit_image skill to work on) or produced by generate_image /

@@ -20,12 +20,18 @@
 # touch bytes only transiently, in memory, to call ComfyUI; the browser is
 # the only store. The mauso-data volume may still hold legacy chat_image
 # rows written before that shipped -- read-only now, pending a manual
-# table drop once the maintainer confirms the browser-side migration. This
-# backend DOES still store, in plaintext on disk (mauso-data volume) like
-# every other stack here: the configured LLM endpoint's API key (encrypted
-# at rest with MAUSO_SECRET_KEY, see .env.example), and any files uploaded
-# for the RAG skill (the backend has to read/chunk/embed/search them, so
-# it can't be blind to their content). See README.md for the full picture.
+# table drop once the maintainer confirms the browser-side migration. One
+# exception (#10): a render in progress is tracked server-side in a
+# render_job row so it survives the client disconnecting mid-render --
+# encrypted at rest under MAUSO_SECRET_KEY, holding only status + the
+# finished bytes (never the prompt), deleted by the client once absorbed
+# or swept after RENDER_JOB_TTL_HOURS (default 24) if never picked up.
+# This backend DOES still store, in plaintext on disk (mauso-data volume)
+# like every other stack here: the configured LLM endpoint's API key
+# (encrypted at rest with MAUSO_SECRET_KEY, see .env.example), and any
+# files uploaded for the RAG skill (the backend has to read/chunk/embed/
+# search them, so it can't be blind to their content). See README.md for
+# the full picture.
 name: mauso
 
 networks:

@@ -3,8 +3,9 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 
-from .db import init_db
-from .routers import chat, files, images, notes_router, profiles, settings_router
+from . import render_jobs
+from .db import SessionLocal, init_db
+from .routers import chat, files, images, notes_router, profiles, render_jobs_router, settings_router
 from .templating import templates
 
 logging.basicConfig(level=logging.INFO)
@@ -18,6 +19,7 @@ app.include_router(files.router)
 app.include_router(images.router)
 app.include_router(profiles.router)
 app.include_router(notes_router.router)
+app.include_router(render_jobs_router.router)
 
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
@@ -25,6 +27,11 @@ app.mount("/static", StaticFiles(directory="app/static"), name="static")
 @app.on_event("startup")
 def on_startup():
     init_db()
+    db = SessionLocal()
+    try:
+        render_jobs.reset_stale_jobs(db)
+    finally:
+        db.close()
 
 
 @app.get("/healthz")
