@@ -10,7 +10,10 @@ let availableModels = []; // [{id, vision}, ...] from /api/models
 let modelVisionSupport = new Map(); // model id -> bool, derived from availableModels on each refresh
 let availableProfiles = []; // [{ id, name, model, system_prompt }]
 let defaultModel = ""; // the Settings-page global default
-let pendingImageAttachments = []; // [{ id, url }] -- filled as images are uploaded via the attach button
+let pendingImageAttachments = []; // [{ id, url, source }] -- filled as images are attached via the attach button
+let imageKey = null; // HKDF subkey for the "images" IndexedDB store, derived once in boot()
+let activeBlobUrls = []; // blob: URLs for images currently rendered in the transcript -- revoked in renderMessages()
+let mentionBlobUrls = []; // blob: URLs for the @image mention dropdown's thumbnails -- revoked in hideMentionDropdown()
 
 // Whether streaming/new messages should auto-scroll the message pane to the
 // bottom. Starts true; goes false the moment the user scrolls away from the
@@ -195,6 +198,9 @@ window.addEventListener("popstate", () => {
 // ---------- Boot ----------
 
 async function boot() {
+  imageKey = await Crypto.deriveSubkey(Crypto.getSessionKeyRawBits(), "mauso-image-key");
+  await migrateImagesIfNeeded();
+  reconcileRenderJobs(); // not awaited -- covers reload-after-navigating-away, see #10
   await refreshFiles();
   await refreshModels();
   await refreshProfiles();
@@ -250,6 +256,129 @@ async function boot() {
     }
     persistCurrentConvo();
   });
+}
+
+// One-time, lazy migration (#11 stage 2): before this shipped, every image
+// lived server-side under an integer id, referenced from a conversation
+// record's image_url. Images now live only in the browser, so this walks
+// every persisted conversation once, pulls any not-yet-local legacy image's
+// bytes in via the still-available (read-only) GET route, and stores them
+// under their existing id in the "images" store. Conversation records
+// themselves are never rewritten -- image_url stays as a harmless fallback
+// field forever; resolveImageBytes() below tries IndexedDB first and only
+// falls back to fetching it if a lookup misses, so nothing here needs to
+// correct outgoing references. Guarded by Crypto.hasImagesMigrated() so
+// this only ever runs once per vault, mirroring getOrCreateSalt's backfill
+// idiom in crypto.js.
+async function migrateImagesIfNeeded() {
+  if (await Crypto.hasImagesMigrated()) return;
+  const alreadyLocal = new Set(await Crypto.listImageIds());
+  const records = await Crypto.listConversationRecords();
+  for (const r of records) {
+    let convo;
+    try {
+      convo = await Crypto.loadConversation(sessionKey, r.id);
+    } catch {
+      continue; // a record this passphrase can't decrypt isn't this migration's problem
+    }
+    for (const m of convo.messages || []) {
+      if (m.kind !== "image" || !m.image_url || alreadyLocal.has(m.image_id)) continue;
+      try {
+        const resp = await fetch(m.image_url);
+        if (!resp.ok) continue;
+        const contentType = resp.headers.get("content-type") || "image/png";
+        const bytes = new Uint8Array(await resp.arrayBuffer());
+        await Crypto.storeImage(imageKey, m.image_id, bytes, contentType);
+        alreadyLocal.add(m.image_id);
+      } catch {
+        // Best-effort -- one unreachable/already-gone legacy image
+        // shouldn't block the rest of the pass or the mark-done step below.
+      }
+    }
+  }
+  await Crypto.markImagesMigrated();
+}
+
+// Resolves one pending render job against the server (#10). Returns
+// "pending" (still queued/running, or the request itself failed -- try
+// again later) or {status: "succeeded", bytes, contentType} /
+// {status: "failed", error}. Deletes the server-side job row once it's
+// been absorbed either way -- a 404 (e.g. a server restart swept it, or
+// it was never actually created) counts as "failed" with a clear reason
+// rather than leaving the placeholder stuck pending forever.
+async function pollRenderJob(jobId) {
+  let resp;
+  try {
+    resp = await fetch(`/api/render-jobs/${jobId}`);
+  } catch {
+    return "pending";
+  }
+  if (resp.status === 404) {
+    return { status: "failed", error: "This render's record is gone (the server may have restarted)." };
+  }
+  if (!resp.ok) return "pending";
+  const body = await resp.json();
+  if (body.status === "succeeded") {
+    fetch(`/api/render-jobs/${jobId}`, { method: "DELETE" }).catch(() => {});
+    return { status: "succeeded", bytes: new Uint8Array(Crypto.b64ToBuf(body.image_b64)), contentType: body.content_type || "image/png" };
+  }
+  if (body.status === "failed") {
+    fetch(`/api/render-jobs/${jobId}`, { method: "DELETE" }).catch(() => {});
+    return { status: "failed", error: body.error || "The render failed." };
+  }
+  return "pending"; // queued | running
+}
+
+// Walks every persisted conversation (not just the open one -- the user
+// may have switched away entirely) for a render still marked "pending"
+// and finds out what actually happened server-side. Run once on boot
+// (reload-after-navigating-away) and on visibilitychange -> visible;
+// re-schedules itself every ~5s while anything is still genuinely pending
+// and the page is visible, so a render that finishes while the tab is
+// back in the foreground shows up without needing another reload.
+async function reconcileRenderJobs() {
+  const records = await Crypto.listConversationRecords();
+  let anyStillPending = false;
+  for (const r of records) {
+    let convo;
+    try {
+      convo = await Crypto.loadConversation(sessionKey, r.id);
+    } catch {
+      continue;
+    }
+    const pending = (convo.messages || []).filter((m) => m.kind === "image" && m.status === "pending");
+    if (!pending.length) continue;
+    let changed = false;
+    for (const m of pending) {
+      const outcome = await pollRenderJob(m.jobId);
+      if (outcome === "pending") {
+        anyStillPending = true;
+        continue;
+      }
+      changed = true;
+      if (outcome.status === "succeeded") {
+        await Crypto.storeImage(imageKey, m.jobId, outcome.bytes, outcome.contentType);
+        // "recovered" (not a plain resolved state) -- this turn's SSE
+        // connection actually dropped before the result arrived, unlike
+        // the live tool_result path above, so renderMessage adds a note.
+        m.status = "recovered";
+        m.image_id = m.jobId;
+      } else {
+        m.status = "failed";
+        m.error = outcome.error;
+      }
+    }
+    if (changed) {
+      await Crypto.saveConversation(sessionKey, r.id, convo);
+      if (currentConvo && currentConvo.id === r.id) {
+        currentConvo = convo;
+        renderMessages();
+      }
+    }
+  }
+  if (anyStillPending && document.visibilityState === "visible") {
+    setTimeout(reconcileRenderJobs, 5000);
+  }
 }
 
 // Populates the model picker from the configured endpoint's /models list
@@ -579,9 +708,62 @@ function deriveTitle() {
   if (firstUser) currentConvo.title = firstUser.content.slice(0, 60);
 }
 
+// ---------- Image byte resolution (#11 stage 2) ----------
+//
+// Images now live only in IndexedDB ("images" store, see crypto.js). Every
+// display/vision/attach site resolves bytes through resolveImageBytes()
+// below: try the local store first, and only fall back to fetching
+// legacyUrl (the pre-#11-stage-2 server endpoint, still live read-only) if
+// that misses -- i.e. for an image this vault hasn't migrated/stored
+// locally yet. New images never get an image_url at all, so for them the
+// local lookup is the only path.
+
+async function resolveImageBytes(imageId, legacyUrl) {
+  const local = await Crypto.loadImage(imageKey, imageId);
+  if (local) return local;
+  if (!legacyUrl) return null;
+  try {
+    const resp = await fetch(legacyUrl);
+    if (!resp.ok) return null;
+    const contentType = resp.headers.get("content-type") || "image/png";
+    const bytes = new Uint8Array(await resp.arrayBuffer());
+    return { bytes, contentType };
+  } catch {
+    return null;
+  }
+}
+
+function trackedBlobUrl(bytes, contentType) {
+  const url = URL.createObjectURL(new Blob([bytes], { type: contentType }));
+  activeBlobUrls.push(url);
+  return url;
+}
+
+function revokeTrackedBlobUrls() {
+  for (const url of activeBlobUrls) URL.revokeObjectURL(url);
+  activeBlobUrls = [];
+}
+
+function trackedMentionBlobUrl(bytes, contentType) {
+  const url = URL.createObjectURL(new Blob([bytes], { type: contentType }));
+  mentionBlobUrls.push(url);
+  return url;
+}
+
+function revokeMentionBlobUrls() {
+  for (const url of mentionBlobUrls) URL.revokeObjectURL(url);
+  mentionBlobUrls = [];
+}
+
 // ---------- Rendering ----------
 
 function renderMessages() {
+  // Every call here means the previously-rendered transcript's images (if
+  // any) are about to be thrown away -- revoke their blob: URLs before
+  // clearing the DOM, not after, so nothing can still reference a revoked
+  // one. Covers every conversation-switch path (newConversation,
+  // openConversation, retryMessage all funnel through this).
+  revokeTrackedBlobUrls();
   const box = el("messages");
   box.innerHTML = "";
   for (const m of currentConvo.messages) box.appendChild(renderMessage(m));
@@ -604,6 +786,33 @@ function renderMessage(m) {
     div.appendChild(body);
   } else if (m.kind === "image") {
     div.className += " msg-image";
+    // Set whenever a render went through the resumable-job path (#10),
+    // regardless of its current status -- lets updateImageMessageByJobId
+    // find this exact node again later to patch it in place.
+    if (m.jobId) div.dataset.jobId = m.jobId;
+
+    if (m.status === "pending") {
+      div.className += " msg-image-pending";
+      const p = document.createElement("div");
+      p.className = "msg-image-caption";
+      p.textContent = `⏳ ${m.source === "edited" ? "Editing" : "Generating"} image${m.prompt ? ` (${m.prompt})` : ""}...`;
+      div.appendChild(p);
+      return div;
+    }
+    if (m.status === "failed") {
+      div.className += " msg-image-failed";
+      const p = document.createElement("div");
+      p.className = "msg-image-caption";
+      p.textContent = `⚠️ ${m.source === "edited" ? "Edit" : "Generation"} failed: ${m.error || "unknown error"}`;
+      const retryBtn = document.createElement("button");
+      retryBtn.type = "button";
+      retryBtn.className = "msg-image-retry-btn";
+      retryBtn.textContent = "Retry";
+      retryBtn.addEventListener("click", () => retryImageMessage(m));
+      div.append(p, retryBtn);
+      return div;
+    }
+
     const p = document.createElement("div");
     p.className = "msg-image-caption";
     const label = m.source === "upload" ? "Uploaded image"
@@ -612,11 +821,20 @@ function renderMessage(m) {
     const idSpan = document.createElement("span");
     idSpan.className = "hint";
     const elapsed = formatElapsed(m.elapsedMs);
-    idSpan.textContent = ` (id ${m.image_id})${elapsed ? ` · ${elapsed}` : ""}`;
+    // "recovered" means the turn that started this render got interrupted
+    // (tab backgrounded/closed) before the result came back over SSE --
+    // reconcileRenderJobs() picked it up afterward. The image itself made
+    // it; any text the model would have said about it in the same turn
+    // didn't, and isn't reconstructed -- see #10's accepted scope.
+    const recoveredNote = m.status === "recovered" ? " (response interrupted — image recovered)" : "";
+    idSpan.textContent = ` (id ${m.image_id})${elapsed ? ` · ${elapsed}` : ""}${recoveredNote}`;
     p.textContent = `🖼 ${label}`;
     p.appendChild(idSpan);
     const img = document.createElement("img");
-    img.src = m.image_url;
+    img.src = LOADING_THUMB_SRC;
+    resolveImageBytes(m.image_id, m.image_url).then((resolved) => {
+      if (resolved) img.src = trackedBlobUrl(resolved.bytes, resolved.contentType);
+    });
     div.appendChild(p);
     const tag = imageTagForId(m.image_id);
     if (tag) {
@@ -637,6 +855,43 @@ function renderMessage(m) {
   return div;
 }
 
+// Removes a failed render's placeholder and pre-fills the composer with a
+// retry instruction for the user to review and send themselves, rather
+// than silently re-triggering a new LLM/ComfyUI call on their behalf --
+// tools are only ever invoked by the model deciding to call them, there's
+// no direct "run this tool again" path, and auto-resending without
+// confirmation would spend a turn/render the user didn't explicitly ask
+// for again.
+function retryImageMessage(m) {
+  currentConvo.messages = currentConvo.messages.filter((msg) => msg !== m);
+  renderMessages();
+  persistCurrentConvo();
+  const input = el("message-input");
+  input.value = m.source === "edited"
+    ? `Please retry editing that image: ${m.prompt}`
+    : `Please retry generating that image: ${m.prompt}`;
+  autoResizeComposerInput();
+  input.focus();
+}
+
+// Finds the still-in-currentConvo image message with this jobId (any
+// status), lets `mutate` change it in place, then patches the already-
+// rendered DOM node (found via the data-job-id set above) to match --
+// without a full renderMessages() pass. Used by the live tool_result path
+// (connection survived) where other turn content may still be streaming
+// in concurrently; reconcileRenderJobs() below updates a *different*
+// (possibly not-open) conversation's record directly instead, since it
+// has no live DOM to patch.
+function updateImageMessageByJobId(jobId, mutate) {
+  const idx = currentConvo.messages.findIndex((msg) => msg.kind === "image" && msg.jobId === jobId);
+  if (idx === -1) return null;
+  const msg = currentConvo.messages[idx];
+  mutate(msg);
+  const oldNode = el("messages").querySelector(`[data-job-id="${jobId}"]`);
+  if (oldNode) oldNode.replaceWith(renderMessage(msg));
+  return msg;
+}
+
 // ---------- Image @mentions ----------
 //
 // Every image in the conversation (uploaded, pasted from the web, or
@@ -654,7 +909,9 @@ function imageTagEntries() {
   const entries = [];
   let n = 0;
   for (const m of currentConvo.messages) {
-    if (m.kind !== "image") continue;
+    // Pending/failed renders (#10) have no bytes to resolve yet -- don't
+    // make them @-mentionable/attachable until they actually resolve.
+    if (m.kind !== "image" || m.status === "pending" || m.status === "failed") continue;
     n += 1;
     entries.push({ tag: `image${n}`, id: m.image_id, url: m.image_url });
   }
@@ -680,6 +937,29 @@ function resolveMentions(text, tagToId) {
     const id = tagToId.get(`image${n}`);
     return id != null ? `image id=${id}` : whole;
   });
+}
+
+function imageUrlForId(imageId) {
+  const entry = imageTagEntries().find((e) => e.id === imageId);
+  return entry ? entry.url : null;
+}
+
+// Images explicitly @-mentioned anywhere in the conversation's stored text
+// -- the sole "attach this for edit_image to work on" signal (per the #11
+// UX decision: no separate attach control). Scoping attached_images to
+// just these, rather than every image ever in the conversation, keeps the
+// outgoing request body from growing without bound as a conversation
+// accumulates images that are never referred back to.
+function mentionedImageIds(tagToId) {
+  const ids = new Set();
+  for (const m of currentConvo.messages) {
+    if (typeof m.content !== "string") continue;
+    for (const match of m.content.matchAll(MENTION_TOKEN_RE)) {
+      const id = tagToId.get(`image${match[1]}`);
+      if (id != null) ids.add(id);
+    }
+  }
+  return ids;
 }
 
 let mentionState = null; // { start, end, entries, selectedIndex } while the dropdown is open; else null
@@ -725,8 +1005,11 @@ function showMentionDropdown(entries, mention) {
     item.type = "button";
     item.className = "mention-item" + (i === 0 ? " selected" : "");
     const img = document.createElement("img");
-    img.src = entry.url;
+    img.src = LOADING_THUMB_SRC;
     img.alt = "";
+    resolveImageBytes(entry.id, entry.url).then((resolved) => {
+      if (resolved) img.src = trackedMentionBlobUrl(resolved.bytes, resolved.contentType);
+    });
     const label = document.createElement("span");
     label.textContent = `@${entry.tag}`;
     item.append(img, label);
@@ -743,6 +1026,7 @@ function hideMentionDropdown() {
   mentionState = null;
   el("mention-dropdown").hidden = true;
   el("mention-dropdown").innerHTML = "";
+  revokeMentionBlobUrls();
 }
 
 function moveMentionSelection(delta) {
@@ -988,27 +1272,26 @@ async function onAttachChange(e) {
   }
 }
 
-// Uploads one file, showing an instant local blob: preview before the
-// upload round-trip even starts -- no reason to make the user wait to see
-// what they picked -- then swaps it for the stored /api/chat-images URL.
+// Reads the file directly and stores it in the local "images" store --
+// no server round-trip at all (#11 stage 2). Shows an instant local blob:
+// preview, which stays as the thumbnail's permanent src since there's
+// nothing to swap it for anymore.
 async function uploadAttachment(file) {
   const localPreviewUrl = URL.createObjectURL(file);
-  const holder = { id: null, url: null, source: "upload" }; // filled in below; the remove button closes over this
+  const holder = { id: null, source: "upload", previewUrl: localPreviewUrl }; // filled in below; the remove button closes over this
   const thumb = addAttachThumb(localPreviewUrl, holder);
-  el("attach-status").textContent = "Uploading...";
-  const form = new FormData();
-  form.append("file", file);
-  const resp = await fetch("/api/chat-images", { method: "POST", body: form });
-  URL.revokeObjectURL(localPreviewUrl);
-  if (!resp.ok) {
+  const contentType = file.type || "image/png";
+  const id = crypto.randomUUID();
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    await Crypto.storeImage(imageKey, id, bytes, contentType);
+  } catch {
+    URL.revokeObjectURL(localPreviewUrl);
     thumb.remove();
-    el("attach-status").textContent = `${file.name}: upload failed.`;
+    el("attach-status").textContent = `${file.name}: couldn't store that image.`;
     return;
   }
-  const result = await resp.json();
-  holder.id = result.id;
-  holder.url = result.url;
-  thumb.querySelector("img").src = result.url;
+  holder.id = id;
   pendingImageAttachments.push(holder);
   updateAttachStatus();
 }
@@ -1020,11 +1303,14 @@ const LOADING_THUMB_SRC = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAE
 
 // Same shape as uploadAttachment, but for an image pasted as a URL (or
 // found in pasted HTML) rather than as clipboard file bytes -- see
-// onComposerPaste. The fetch happens server-side (chat-images/fetch-url)
-// since a client-side fetch() of an arbitrary third-party image host would
-// usually be blocked by CORS before the bytes could be read into a blob.
+// onComposerPaste. The fetch still happens server-side
+// (chat-images/fetch-url, SSRF-guarded) since a client-side fetch() of an
+// arbitrary third-party image host would usually be blocked by CORS before
+// the bytes could be read into a blob -- but the server no longer stores
+// what it fetches (#11 stage 2), it just hands the bytes back as base64
+// for the client to store locally, same as a direct upload.
 async function uploadAttachmentFromUrl(url) {
-  const holder = { id: null, url: null, source: "url" };
+  const holder = { id: null, source: "url", previewUrl: null };
   const thumb = addAttachThumb(LOADING_THUMB_SRC, holder);
   thumb.classList.add("attach-thumb-loading");
   el("attach-status").textContent = "Fetching image...";
@@ -1047,10 +1333,21 @@ async function uploadAttachmentFromUrl(url) {
     return;
   }
   const result = await resp.json();
-  holder.id = result.id;
-  holder.url = result.url;
+  const bytes = new Uint8Array(Crypto.b64ToBuf(result.data_b64));
+  const contentType = result.content_type || "image/png";
+  const id = crypto.randomUUID();
+  try {
+    await Crypto.storeImage(imageKey, id, bytes, contentType);
+  } catch {
+    thumb.remove();
+    el("attach-status").textContent = "Couldn't store that image.";
+    return;
+  }
+  const previewUrl = URL.createObjectURL(new Blob([bytes], { type: contentType }));
+  holder.id = id;
+  holder.previewUrl = previewUrl;
   thumb.classList.remove("attach-thumb-loading");
-  thumb.querySelector("img").src = result.url;
+  thumb.querySelector("img").src = previewUrl;
   pendingImageAttachments.push(holder);
   updateAttachStatus();
 }
@@ -1108,6 +1405,8 @@ function addAttachThumb(previewUrl, holder) {
   removeBtn.addEventListener("click", () => {
     pendingImageAttachments = pendingImageAttachments.filter((a) => a !== holder);
     thumb.remove();
+    if (holder.previewUrl) URL.revokeObjectURL(holder.previewUrl);
+    if (holder.id) Crypto.deleteImage(holder.id);
     updateAttachStatus();
   });
   thumb.append(img, removeBtn);
@@ -1134,22 +1433,20 @@ function clearAttachPreview() {
 }
 
 // Data: URLs for images already sent to the LLM this session, keyed by
-// image_id -- avoids re-fetching/re-encoding the same image from
-// /api/chat-images on every turn (the whole history is resent each turn).
+// image_id -- avoids re-reading/re-encoding the same image from the
+// "images" store on every turn (the whole history is resent each turn).
 // Deliberately NOT stored on the message object / currentConvo.messages,
 // since that gets persisted to IndexedDB via persistCurrentConvo.
 const imageDataUrlCache = new Map();
 
-async function imageToDataUrl(imageId, url) {
+// Returns null if the image can't be resolved at all (neither locally nor,
+// for a pre-migration legacy reference, via legacyUrl) -- callers fall back
+// to the text-only placeholder in that case.
+async function imageToDataUrl(imageId, legacyUrl) {
   if (imageDataUrlCache.has(imageId)) return imageDataUrlCache.get(imageId);
-  const resp = await fetch(url);
-  const blob = await resp.blob();
-  const dataUrl = await new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(blob);
-  });
+  const resolved = await resolveImageBytes(imageId, legacyUrl);
+  if (!resolved) return null;
+  const dataUrl = `data:${resolved.contentType};base64,${Crypto.bufToB64(resolved.bytes)}`;
   imageDataUrlCache.set(imageId, dataUrl);
   return dataUrl;
 }
@@ -1171,6 +1468,9 @@ async function toApiMessage(m, visionCapable, tagToId) {
       return { role: m.role, content: placeholder };
     }
     const dataUrl = await imageToDataUrl(m.image_id, m.image_url);
+    if (!dataUrl) {
+      return { role: m.role, content: placeholder };
+    }
     return {
       role: m.role,
       content: [
@@ -1203,7 +1503,10 @@ async function onSend(e) {
   el("attach-input").value = "";
 
   for (const attachment of attachments) {
-    appendMessage({ role: "user", kind: "image", image_id: attachment.id, image_url: attachment.url, source: attachment.source || "upload" });
+    appendMessage({ role: "user", kind: "image", image_id: attachment.id, source: attachment.source || "upload" });
+    // The composer preview's blob: URL is now obsolete -- the just-appended
+    // message renders its own, freshly resolved from the "images" store.
+    if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
   }
   if (text) {
     appendMessage({ role: "user", content: text, timestamp: Date.now() });
@@ -1268,6 +1571,14 @@ async function runAgentTurn() {
       .map((m) => toApiMessage(m, visionCapable, tagToId))
   );
 
+  const attachedImages = [];
+  for (const id of mentionedImageIds(tagToId)) {
+    const resolved = await resolveImageBytes(id, imageUrlForId(id));
+    if (resolved) {
+      attachedImages.push({ id, data_b64: Crypto.bufToB64(resolved.bytes), content_type: resolved.contentType });
+    }
+  }
+
   activeAbortController = new AbortController();
   setSendingState(true);
 
@@ -1280,6 +1591,7 @@ async function runAgentTurn() {
         active_document_ids: currentConvo.activeDocumentIds,
         model: currentConvo.model || "",
         profile_id: currentConvo.profileId || null,
+        attached_images: attachedImages,
       }),
       signal: activeAbortController.signal,
     });
@@ -1298,7 +1610,7 @@ async function runAgentTurn() {
         const line = part.trim();
         if (!line.startsWith("data:")) continue;
         const event = JSON.parse(line.slice(5).trim());
-        handleEvent(event, assistantMsg, assistantNode, statusEl, turnTiming);
+        await handleEvent(event, assistantMsg, assistantNode, statusEl, turnTiming);
       }
     }
   } catch (err) {
@@ -1343,9 +1655,10 @@ function setSendingState(active) {
 
 // Keeps the screen from auto-locking while a turn (LLM roundtrip or a slow
 // tool like generate_image/edit_image, which can take minutes) is in
-// flight -- there's nothing server-side to reconnect to if the connection
-// dies (see the "no server-side persistence" privacy model in CLAUDE.md),
-// so losing the tab mid-turn just loses the reply. Doesn't help with
+// flight. As of #10, an in-flight image render specifically survives the
+// connection dying (reconcileRenderJobs() picks it up on return) -- but
+// the rest of the turn (any text reply, non-image tool results) still
+// doesn't, so losing the tab mid-turn still loses those. Doesn't help with
 // switching away from the tab/app entirely -- only screen auto-lock -- and
 // silently does nothing on browsers without Wake Lock support (notably
 // desktop Firefox) rather than failing the turn over it.
@@ -1366,12 +1679,16 @@ function releaseWakeLock() {
   wakeLock = null;
 }
 
-// The spec releases the lock automatically when the tab is hidden (locking
-// the screen counts) -- re-acquire on return if a turn is still running,
-// otherwise the rest of that same turn is unprotected.
+// The spec releases the wake lock automatically when the tab is hidden
+// (locking the screen counts) -- re-acquire on return if a turn is still
+// running, otherwise the rest of that same turn is unprotected. Also the
+// other trigger (besides boot()) for reconcileRenderJobs() (#10) -- covers
+// coming back to a tab that was backgrounded during a render, without
+// needing a full reload.
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && activeAbortController && !wakeLock) {
-    requestWakeLock();
+  if (document.visibilityState === "visible") {
+    if (activeAbortController && !wakeLock) requestWakeLock();
+    reconcileRenderJobs();
   }
 });
 
@@ -1403,7 +1720,7 @@ function setThinking(node, on) {
   }
 }
 
-function handleEvent(event, assistantMsg, assistantNode, statusEl, turnTiming) {
+async function handleEvent(event, assistantMsg, assistantNode, statusEl, turnTiming) {
   if (event.type === "token") {
     if (assistantNode.classList.contains("thinking")) setThinking(assistantNode, false);
     assistantMsg.content += event.content;
@@ -1415,17 +1732,62 @@ function handleEvent(event, assistantMsg, assistantNode, statusEl, turnTiming) {
     if (label) label.textContent = modelLabelText(assistantMsg);
   } else if (event.type === "tool_call") {
     turnTiming.toolStartTime = performance.now();
+    turnTiming.lastToolCallArgs = event.args;
     statusEl.textContent = `Using ${event.name}...`;
+  } else if (event.type === "render_job") {
+    // Announced before the (possibly multi-minute) render starts, not
+    // buried in a tool_result that would only arrive after it finishes --
+    // see render_jobs.py / #10. Insert the placeholder AND persist right
+    // away, not at turn end like everything else here: this is the actual
+    // fix for the bug (today nothing hits IndexedDB until the whole turn
+    // finishes, so a mid-render disconnect loses it with nothing to
+    // recover from on return).
+    const assistantWrap = assistantNode.parentElement;
+    const args = turnTiming.lastToolCallArgs || {};
+    insertMessage({
+      role: "assistant", kind: "image", turnId: assistantMsg.turnId, jobId: event.job_id,
+      status: "pending", prompt: args.prompt || "", source: event.name === "edit_image" ? "edited" : "generated",
+    }, assistantWrap);
+    await persistCurrentConvo();
   } else if (event.type === "tool_result") {
     const assistantWrap = assistantNode.parentElement;
     const elapsedMs = turnTiming.toolStartTime != null ? performance.now() - turnTiming.toolStartTime : null;
     turnTiming.toolStartTime = null;
-    if ((event.name === "generate_image" || event.name === "edit_image") && event.result.image_url) {
-      insertMessage({
-        role: "assistant", kind: "image", turnId: assistantMsg.turnId, elapsedMs,
-        image_id: event.result.image_id, image_url: event.result.image_url,
-        prompt: event.result.prompt, source: event.name === "edit_image" ? "edited" : "generated",
-      }, assistantWrap);
+    if (event.name === "generate_image" || event.name === "edit_image") {
+      const jobId = event.result.job_id;
+      if (event.result.image_b64) {
+        // Store the bytes locally before resolving the placeholder --
+        // renderMessage's resolution for this message id then finds them
+        // immediately, no round trip to anywhere.
+        const bytes = new Uint8Array(Crypto.b64ToBuf(event.result.image_b64));
+        await Crypto.storeImage(imageKey, event.result.image_id, bytes, event.result.content_type || "image/png");
+        const resolved = jobId && updateImageMessageByJobId(jobId, (msg) => {
+          delete msg.status;
+          delete msg.error;
+          msg.image_id = event.result.image_id;
+          msg.elapsedMs = elapsedMs;
+          msg.prompt = event.result.prompt;
+        });
+        if (!resolved) {
+          // No matching pending placeholder -- shouldn't normally happen,
+          // since the render_job event always precedes this one for these
+          // tools, but fall back to inserting fresh rather than dropping
+          // the result.
+          insertMessage({
+            role: "assistant", kind: "image", turnId: assistantMsg.turnId, elapsedMs, jobId,
+            image_id: event.result.image_id, prompt: event.result.prompt,
+            source: event.name === "edit_image" ? "edited" : "generated",
+          }, assistantWrap);
+        }
+        // The client has the bytes now via the normal path -- the job row
+        // is redundant, clean it up rather than leaving it to the TTL sweep.
+        if (jobId) fetch(`/api/render-jobs/${jobId}`, { method: "DELETE" }).catch(() => {});
+      } else if (event.result.error) {
+        const resolved = jobId && updateImageMessageByJobId(jobId, (msg) => { msg.status = "failed"; msg.error = event.result.error; });
+        if (!resolved) statusEl.textContent = `${event.name} error: ${event.result.error}`;
+        if (jobId) fetch(`/api/render-jobs/${jobId}`, { method: "DELETE" }).catch(() => {});
+      }
+      await persistCurrentConvo();
     } else if (event.name === "create_note") {
       insertMessage({ role: "assistant", kind: "note", turnId: assistantMsg.turnId, title: event.result.title, content: event.result.content_markdown }, assistantWrap);
     } else if (event.result && event.result.error) {

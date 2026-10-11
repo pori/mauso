@@ -17,7 +17,8 @@ import uuid
 from sqlalchemy.orm import Session
 
 from . import comfy_common
-from ..chat_images import read_chat_image_bytes, store_chat_image
+from .. import render_jobs
+from ..chat_images import read_chat_image_bytes
 from ..models import ChatImage
 from ..upload_validation import is_valid_image
 from .image_gen import CLIP_NAME, DEFAULT_UNET, VAE_NAME
@@ -86,31 +87,50 @@ def _resolve_source(source_image_id, attached_images: dict, db: Session):
     return read_chat_image_bytes(source), source.content_type, source.id, None
 
 
-async def run(args: dict, db: Session, comfyui_checkpoint: str, attached_images: dict = None) -> dict:
+async def run(args: dict, db: Session, comfyui_checkpoint: str, attached_images: dict, job_id: str) -> dict:
     source_image_id = args.get("source_image_id")
     prompt = (args.get("prompt") or "").strip()
 
     if not source_image_id:
-        return {"error": "No source_image_id given -- reference a prior generate_image/edit_image result's id, or an uploaded image's id."}
+        err = {"error": "No source_image_id given -- reference a prior generate_image/edit_image result's id, or an uploaded image's id."}
+        render_jobs.mark_failed(job_id, err["error"])
+        return err
     if not prompt:
+        render_jobs.mark_failed(job_id, "No edit instruction given.")
         return {"error": "No edit instruction given."}
 
     source_bytes, content_type, source_ref, error = _resolve_source(source_image_id, attached_images or {}, db)
     if error:
+        render_jobs.mark_failed(job_id, error["error"])
         return error
 
     unet_name = comfyui_checkpoint.strip() if comfyui_checkpoint else DEFAULT_UNET
-    try:
+
+    async def _render():
         uploaded_filename = await comfy_common.upload_source_image(
             f"mauso_source_{source_ref}.png", content_type, source_bytes,
         )
         graph = _build_graph(unet_name, uploaded_filename, prompt)
-        image_bytes = await comfy_common.submit_and_wait(graph)
+        return await comfy_common.submit_and_wait(graph)
+
+    try:
+        # track() covers the upload + the render -- any failure in either
+        # step gets recorded on the job row, and a client disconnect from
+        # here on doesn't kill an in-flight render. See render_jobs.py / #10.
+        image_bytes = await render_jobs.track(job_id, _render())
     except comfy_common.ComfyUIError as e:
         return {"error": str(e)}
 
-    record = store_chat_image(db, image_bytes, "image/png", prompt=prompt, source="edited")
+    # No server-side persistence of the result beyond the transient
+    # RenderJob outbox (#10) -- same as generate_image, the edited bytes go
+    # straight back to the client as base64. image_id is job_id itself: the
+    # client already recorded that id from the render_job event before this
+    # render even started, so there's one id, not two.
     return {
-        "image_id": record.id, "image_url": f"/api/chat-images/{record.id}",
-        "prompt": prompt, "source_image_id": source_ref,
+        "image_id": job_id,
+        "job_id": job_id,
+        "image_b64": base64.b64encode(image_bytes).decode(),
+        "content_type": "image/png",
+        "prompt": prompt,
+        "source_image_id": source_ref,
     }

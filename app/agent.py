@@ -15,7 +15,7 @@ from typing import AsyncIterator
 
 from sqlalchemy.orm import Session
 
-from . import llm_client, settings_store
+from . import llm_client, render_jobs, settings_store
 from .config import settings
 from .models import Profile
 from .tools import image_edit, image_gen, notes, rag, web_search
@@ -64,12 +64,12 @@ def _build_system_prompt(tool_schemas: list, profile_prompt: str = "") -> str:
 async def _execute_tool(
     name: str, args: dict, db: Session, active_document_ids: list, base_url: str, api_key: str,
     embedding_model: str, comfyui_checkpoint: str, tavily_api_key: str, attached_images: dict,
-    attached_notes: list, attached_doc_chunks: list,
+    attached_notes: list, attached_doc_chunks: list, job_id: str = None,
 ) -> dict:
     if name == "generate_image":
-        return await image_gen.run(args, db, comfyui_checkpoint)
+        return await image_gen.run(args, comfyui_checkpoint, job_id)
     if name == "edit_image":
-        return await image_edit.run(args, db, comfyui_checkpoint, attached_images)
+        return await image_edit.run(args, db, comfyui_checkpoint, attached_images, job_id)
     if name == "create_note":
         return notes.run(args)
     if name == "search_notes":
@@ -119,11 +119,36 @@ async def run_agent_turn(
                 except json.JSONDecodeError:
                     args = {}
                 yield {"type": "tool_call", "name": name, "args": args}
+                job_id = None
+                if name in ("generate_image", "edit_image"):
+                    # Created and announced *before* the (possibly
+                    # multi-minute) render starts, not buried in a result
+                    # that would only arrive after it finishes -- the
+                    # client needs this id in hand immediately so it can
+                    # persist a resumable placeholder before a disconnect
+                    # can lose it. See render_jobs.py / #10.
+                    job = render_jobs.create_job(db, "generate" if name == "generate_image" else "edit")
+                    job_id = job.id
+                    yield {"type": "render_job", "job_id": job_id, "name": name}
                 result = await _execute_tool(
                     name, args, db, active_document_ids, base_url, api_key, embedding_model, comfyui_checkpoint,
-                    tavily_api_key, attached_images_by_id, attached_notes, attached_doc_chunks,
+                    tavily_api_key, attached_images_by_id, attached_notes, attached_doc_chunks, job_id,
                 )
                 yield {"type": "tool_result", "name": name, "result": result}
+                if name in ("generate_image", "edit_image") and result.get("image_b64"):
+                    # Makes a freshly generated/edited image available to a
+                    # later edit_image call in this same turn via the
+                    # attached-images bag, the same path a client-attached
+                    # image already resolves through -- without ever
+                    # needing a ChatImage row. attached_images_by_id is the
+                    # same dict object passed into every _execute_tool call
+                    # in this loop, so mutating it here is visible to the
+                    # next iteration.
+                    attached_images_by_id[str(result["image_id"])] = {
+                        "id": result["image_id"],
+                        "data_b64": result["image_b64"],
+                        "content_type": result.get("content_type", "image/png"),
+                    }
                 working_messages.append({
                     "role": "tool", "tool_call_id": tc.get("id", ""), "content": json.dumps(result),
                 })

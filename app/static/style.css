@@ -484,6 +484,22 @@ main { flex: 1; min-height: 0; display: flex; }
   box-shadow: none;
 }
 .msg-image-tag:hover { background: rgba(0, 0, 0, 0.75); }
+/* A render still in flight after its originating turn got interrupted
+   (tab backgrounded/closed mid-render, see reconcileRenderJobs in app.js)
+   -- no thumbnail yet, just the caption, so no img/wrap sizing to fight. */
+.msg-image-pending .msg-image-caption { color: var(--text-dim); font-style: italic; }
+.msg-image-failed .msg-image-caption { color: var(--danger); }
+.msg-image-retry-btn {
+  margin-top: 0.35rem;
+  padding: 0.3rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  color: var(--text);
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.msg-image-retry-btn:hover { border-color: var(--danger); color: var(--danger); }
 /* A user-uploaded image is its own thing, not a chat bubble -- it inherited
    .msg-user's colored background/border-radius (meant for text) by sharing
    that class, which made it look boxed-in. Let it float free instead,

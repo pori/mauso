@@ -14,10 +14,10 @@ from sqlalchemy import select
 
 from app.db import Base, SessionLocal, engine
 from app import agent, llm_client, settings_store
-from app.models import AppSetting, ChatImage, Chunk, Document, Note, Profile
+from app.models import AppSetting, ChatImage, Chunk, Document, Note, Profile, RenderJob
 from app.tools import comfy_common
 
-ALL_MODELS = [AppSetting, Document, Chunk, Profile, Note, ChatImage]
+ALL_MODELS = [AppSetting, Document, Chunk, Profile, Note, ChatImage, RenderJob]
 
 # A minimal but valid PNG signature -- upload_validation.is_valid_image only
 # looks at the magic bytes, and ComfyUI itself is mocked in the test below.
@@ -92,12 +92,14 @@ async def _fake_submit_and_wait(graph, timeout_polls=None):
 
 
 def test_edit_image_with_attached_source_does_not_persist_the_source_image(client, db_session, monkeypatch):
-    """A source image the browser attaches directly to the request (rather
-    than one already stored server-side via a prior /api/chat-images upload)
-    must never itself become a ChatImage row -- only the edited *output*
-    does, exactly as generate_image already does today. This is the concrete
-    slice of "no persistent server-side copy" this stage of #11 delivers:
-    the ChatImage table grows by exactly one row (the result), never two."""
+    """Neither the source image the browser attaches directly to the
+    request, nor the edited *output*, is ever written to the ChatImage
+    table -- #11 stage 2 removed generate_image/edit_image's own writes
+    entirely. #10 (resumable renders) does add exactly one RenderJob row
+    for the edit -- that's operational bookkeeping (status + the finished
+    bytes as a transient outbox), never conversation/prompt text (see
+    test_render_job_has_no_prompt_or_message_columns below) -- every other
+    table, including chat_image, must still be completely untouched."""
     calls = {"n": 0}
 
     async def _fake_chat_completion(base_url, api_key, model, messages, tools=None):
@@ -137,9 +139,25 @@ def test_edit_image_with_attached_source_does_not_persist_the_source_image(clien
     assert resp.status_code == 200
 
     after = _row_counts(db_session)
-    assert after["chat_image"] == before["chat_image"] + 1
-    for model in ("app_setting", "document", "chunk", "profile", "note"):
+    assert after["render_job"] == before["render_job"] + 1
+    for model in ("app_setting", "document", "chunk", "profile", "note", "chat_image"):
         assert after[model] == before[model]
+
+
+def test_render_job_has_no_prompt_or_message_columns():
+    """Structural guard for the #10 design decision: RenderJob must never
+    grow a column that could hold conversation/prompt text. The client
+    already has the prompt from the tool_call SSE event it received
+    before the render started -- the server has no reason to echo it
+    back, so there's nothing for this table to need to protect beyond the
+    finished image bytes themselves. A column reappearing here would mean
+    someone reintroduced exactly the privacy question #10 sidestepped."""
+    forbidden_substrings = ("prompt", "message", "args", "params")
+    for column in RenderJob.__table__.columns:
+        lowered = column.name.lower()
+        assert not any(s in lowered for s in forbidden_substrings), (
+            f"RenderJob.{column.name} looks like it could hold prompt/message text"
+        )
 
 
 def test_search_notes_with_attached_corpus_does_not_touch_the_note_table(client, db_session, monkeypatch):

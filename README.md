@@ -18,6 +18,30 @@ transcript anywhere -- not even transiently to disk. If you clear that
 browser's site data, or use a different browser/device, that history is
 gone; there is no server-side copy or sync.
 
+**Images are the same way.** Whether you attach one for the edit_image
+skill, or the agent produces one via generate_image/edit_image, the bytes
+are encrypted and stored only in your browser's IndexedDB (a separate
+per-purpose key, derived from the same passphrase) -- this backend holds
+them only in memory for the duration of the request that generates/edits
+them, the same trust boundary as your message text. Two caveats, same as
+transcripts: images are device-local (clearing site data or switching
+browsers loses them), and ComfyUI itself keeps its own copy per whatever
+retention it's configured with, independent of mauso. On first visit
+after upgrading, the browser does a one-time, best-effort pull of any
+images from before this change out of the old server-side table into
+IndexedDB; the `GET`/`DELETE /api/chat-images/{id}` routes stay live,
+read-only, only to support that and manual cleanup -- nothing writes a
+new row through them anymore.
+
+**One exception, to make image generation survive you navigating away
+mid-render on mobile**: a render in progress is briefly tracked server-
+side in a `render_job` row -- encrypted at rest under `MAUSO_SECRET_KEY`
+(same as the API keys), holding only a status and, once finished, the
+image bytes themselves (never the prompt text -- your browser already
+has that). Your browser deletes this row the moment it's pulled the
+result in, normally within moments; if you never reconnect at all, it's
+swept automatically after 24 hours (`RENDER_JOB_TTL_HOURS`).
+
 The derived key is also cached in `sessionStorage` for the tab's lifetime
 (see `crypto.js`) so navigating between Chat/Files/Settings -- each a real
 page load, not SPA routing -- doesn't re-prompt for the passphrase every
@@ -39,12 +63,6 @@ volume), same as every other stack on this host:
   they cannot be end-to-end encrypted the way chat messages are. Don't
   upload anything here you wouldn't put in any other self-hosted app on
   this box.
-- **Images**, whether you attach one for the edit_image skill to work on or
-  the agent produces one via generate_image/edit_image. Same reasoning as
-  above -- ComfyUI has to receive the actual bytes, so they're kept as
-  plaintext blobs in the `chat_image` table (`app/models.py`), addressed by
-  a numeric id (`/api/chat-images/{id}`). There's currently no delete
-  endpoint for these -- they accumulate until the volume is wiped.
 - **Notes you save on the Notes page**, so the `search_notes` skill can look
   them up in plaintext. This is separate from the in-chat "note" replies the
   model produces with `create_note`, which stay in the encrypted
@@ -96,9 +114,11 @@ their current policy yourself before relying on it for anything sensitive.
   partial denoise -> VAEDecode -> SaveImage) against it -- not a
   purpose-built edit workflow, just whatever the configured checkpoint does
   with a partial-denoise pass. Subject to the same checkpoint-must-exist
-  requirement as generate_image. Images are referenced across turns by a
-  small integer id (see the frontend's `[Image id=N: ...]` placeholders in
-  what actually gets sent to the model) so the agent can chain edits.
+  requirement as generate_image. Images are referenced across turns by an
+  opaque id your browser generates (see the frontend's `[Image id=N: ...]`
+  placeholders in what actually gets sent to the model) so the agent can
+  chain edits -- type or click `@imageN` in the composer to attach the
+  actual bytes for an edit, since this backend doesn't hold a copy itself.
 - **create_note** -- asks the model to produce a structured Markdown note
   as a distinct message in the conversation. Purely a formatting
   convention -- it's stored (encrypted) exactly like any other message,
